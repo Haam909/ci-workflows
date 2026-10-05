@@ -10,6 +10,15 @@ on:
 concurrency:
   group: release
   cancel-in-progress: false
+# The repo default token may be read-only. A called workflow can't raise
+# permissions, so grant what the reusable workflow asks for here.
+permissions:
+  contents: write
+  actions: read
+  id-token: write
+  attestations: write
+  deployments: write
+  packages: write
 jobs:
   ci:
     uses: Haam909/ci-workflows/.github/workflows/reusable-release-to-production.yml@v1

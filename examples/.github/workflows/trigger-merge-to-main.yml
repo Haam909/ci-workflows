@@ -6,6 +6,13 @@ on:
 concurrency:
   group: main
   cancel-in-progress: false
+# The repo default token may be read-only. A called workflow can't raise
+# permissions, so grant what the reusable workflow asks for here.
+permissions:
+  contents: read
+  id-token: write
+  deployments: write
+  packages: write
 jobs:
   ci:
     uses: Haam909/ci-workflows/.github/workflows/reusable-deploy-to-test.yml@v1
