@@ -8,6 +8,13 @@ on:
 concurrency:
   group: checks-${{ github.ref }}
   cancel-in-progress: true
+# The repo default token may be read-only (contents/metadata only). A called
+# workflow can't raise permissions, so grant what reusable-verify-pull-request
+# asks for here.
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: read
 jobs:
   ci:
     uses: Haam909/ci-workflows/.github/workflows/reusable-verify-pull-request.yml@v1
