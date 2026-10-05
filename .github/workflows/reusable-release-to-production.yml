@@ -1,0 +1,314 @@
+# org/ci-workflows/.github/workflows/reusable-release-to-production.yml
+#
+# Reusable, manual. The only human decisions are approving the `release`
+# environment and, rarely, ticking the major box. No commit or version input
+# exists.
+#
+# Ordering note: the GitHub Release is created as a draft with every asset
+# attached, and the tag is pushed only after those uploads succeed. A failed
+# upload therefore leaves no orphan tag behind.
+
+name: release-to-production
+
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        type: string
+        default: '.github/components.yml'
+      major:
+        type: boolean
+        default: false
+      node-version:
+        type: string
+        default: '22'
+      dotnet-version:
+        type: string
+        default: '9.0.x'
+      python-version:
+        type: string
+        default: '3.12'
+
+permissions:
+  contents: write
+  actions: read
+  id-token: write
+  attestations: write
+  deployments: write
+  packages: write
+
+jobs:
+  resolve:
+    name: resolve target and version
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
+      version: ${{ steps.version.outputs.version }}
+      components: ${{ steps.read.outputs.components }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: read
+        run: echo "components=$(yq -o=json -I=0 '.components' '${{ inputs.manifest }}')" >> "$GITHUB_OUTPUT"
+
+      - name: Find the commit currently live in test
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA=""; CREATED=""
+          for id in $(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=test&per_page=30" --jq '.[].id'); do
+            state="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}/statuses?per_page=1" --jq '.[0].state // empty')"
+            if [[ "${state}" == "success" ]]; then
+              SHA="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}" --jq '.sha')"
+              CREATED="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}" --jq '.created_at')"
+              break
+            fi
+          done
+          [[ -n "${SHA}" ]] || { echo "::error::No successful deployment to test found."; exit 1; }
+
+          git merge-base --is-ancestor "${SHA}" origin/main \
+            || { echo "::error::Test deployment ${SHA} is not an ancestor of main."; exit 1; }
+
+          AGE=$(( ( $(date +%s) - $(date -d "${CREATED}" +%s) ) / 86400 ))
+          (( AGE > 14 )) && echo "::warning::The test deployment is ${AGE} days old. Confirm this is what you mean to ship."
+
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${SHA} (in test for ${AGE} day(s))"
+
+      - id: version
+        uses: org/ci-workflows/actions/derive-version@v1
+        with:
+          sha: ${{ steps.target.outputs.sha }}
+          force-major: ${{ inputs.major }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### Release v${{ steps.version.outputs.version }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | \`${{ steps.target.outputs.sha }}\` |"
+            echo "| Previous | ${{ steps.version.outputs.previous-tag }} |"
+            echo "| Bump | ${{ steps.version.outputs.bump }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: build ${{ matrix.component.name }}
+    needs: resolve
+    runs-on: ubuntu-latest
+    environment:
+      name: release        # required reviewers here — this is the ship gate
+    strategy:
+      fail-fast: true
+      matrix:
+        component: ${{ fromJSON(needs.resolve.outputs.components) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: org/ci-workflows/actions/install-toolchain@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          node-version: ${{ inputs.node-version }}
+          dotnet-version: ${{ inputs.dotnet-version }}
+          python-version: ${{ inputs.python-version }}
+
+      - uses: azure/login@v2
+        if: matrix.component.target == 'container'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        if: matrix.component.target == 'container'
+        run: az acr login --name "${{ vars.ACR_NAME }}"
+
+      # Locked installs are what make this rebuild from the tested commit
+      # resolve to the same dependencies, rather than checking afterwards.
+      - id: build
+        uses: org/ci-workflows/actions/build-artifact@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          version: ${{ needs.resolve.outputs.version }}
+          registry: ${{ vars.ACR_NAME && format('{0}.azurecr.io', vars.ACR_NAME) || '' }}
+
+      # ---------- SBOM: release deliverable, generated once, here ----------
+
+      - name: SBOM
+        working-directory: ${{ matrix.component.path || '.' }}
+        env:
+          C: ${{ toJSON(matrix.component) }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          OUT="${GITHUB_WORKSPACE}/_artifacts/${{ matrix.component.name }}-${VERSION}.cdx.json"
+          mkdir -p "${GITHUB_WORKSPACE}/_artifacts"
+          case "$(jq -r '.runtime' <<< "$C")" in
+            node)
+              npx --yes @cyclonedx/cyclonedx-npm --omit dev --output-format JSON --output-file "${OUT}" ;;
+            python)
+              # From the pinned requirements, so build tooling on the runner
+              # doesn't end up listed as a shipped dependency.
+              pip install --quiet cyclonedx-bom
+              if [[ -f requirements.lock.txt ]]; then
+                cyclonedx-py requirements requirements.lock.txt -o "${OUT}" --output-format JSON
+              elif [[ -f requirements.txt ]]; then
+                cyclonedx-py requirements requirements.txt -o "${OUT}" --output-format JSON
+              else
+                cyclonedx-py environment -o "${OUT}" --output-format JSON
+              fi ;;
+            dotnet)
+              dotnet tool install --global CycloneDX
+              dotnet CycloneDX "$(jq -r '.project' <<< "$C")" \
+                --output "${GITHUB_WORKSPACE}/_artifacts" \
+                --filename "${{ matrix.component.name }}-${VERSION}.cdx.json" --json ;;
+          esac
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign
+        env:
+          IMAGE: ${{ steps.build.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Containers are signed by digest in the registry; everything else
+          # is signed as a blob with a detached bundle.
+          if [[ "${{ matrix.component.target }}" == "container" ]]; then
+            cosign sign --yes "${IMAGE}"
+          fi
+          for f in _artifacts/*.zip _artifacts/*.nupkg _artifacts/*.tgz _artifacts/*.whl _artifacts/*.tar.gz _artifacts/*.cdx.json; do
+            cosign sign-blob --yes "$f" --bundle "${f}.cosign.bundle"
+          done
+
+      - uses: actions/attest-build-provenance@v2
+        if: matrix.component.target != 'container'
+        with:
+          subject-path: |
+            _artifacts/*.zip
+            _artifacts/*.nupkg
+            _artifacts/*.tgz
+            _artifacts/*.whl
+
+      - name: Record image reference
+        if: matrix.component.target == 'container'
+        run: echo "${{ steps.build.outputs.artifact }}" > "_artifacts/${{ matrix.component.name }}.image"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.component.name }}
+          path: _artifacts/
+          retention-days: 90
+          if-no-files-found: error
+
+  publish:
+    name: tag and publish
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      TARGET_SHA: ${{ needs.resolve.outputs.sha }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: _artifacts
+
+      - name: Checksums
+        run: cd _artifacts && sha256sum * > SHA256SUMS
+
+      - name: Create draft release with assets
+        run: |
+          gh release create "v${VERSION}" _artifacts/* \
+            --target "${TARGET_SHA}" --title "v${VERSION}" \
+            --generate-notes --draft
+
+      - name: Push tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" "${TARGET_SHA}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Publish release
+        run: gh release edit "v${VERSION}" --draft=false
+
+  promote:
+    name: promote ${{ matrix.component.name }}
+    needs: [resolve, publish]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.resolve.outputs.components) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ matrix.component.name }}
+          path: _artifacts
+
+      - uses: actions/setup-node@v4
+        if: matrix.component.target == 'package' && matrix.component.runtime == 'node'
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - uses: actions/setup-dotnet@v4
+        if: matrix.component.target == 'package' && matrix.component.runtime == 'dotnet'
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - uses: actions/setup-python@v5
+        if: matrix.component.target == 'package' && matrix.component.runtime == 'python'
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      # Services always need Azure. Packages need it only when their feed is
+      # Azure Artifacts, to mint the feed token.
+      - uses: azure/login@v2
+        if: matrix.component.target != 'package' || contains(matrix.component.feed || '', 'pkgs.dev.azure.com') || contains(matrix.component.feed || '', 'visualstudio.com')
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve artifact path
+        id: artifact
+        run: |
+          set -euo pipefail
+          case "${{ matrix.component.target }}" in
+            container) echo "path=$(cat '_artifacts/${{ matrix.component.name }}.image')" >> "$GITHUB_OUTPUT" ;;
+            package)
+              case "${{ matrix.component.runtime }}" in
+                dotnet) echo "path=$(ls _artifacts/*.nupkg | head -1)" >> "$GITHUB_OUTPUT" ;;
+                node)   echo "path=$(ls _artifacts/*.tgz    | head -1)" >> "$GITHUB_OUTPUT" ;;
+                python) echo "path=$(ls _artifacts/*.whl    | head -1)" >> "$GITHUB_OUTPUT" ;;
+              esac ;;
+            *) echo "path=_artifacts/${{ matrix.component.name }}-${{ needs.resolve.outputs.version }}.zip" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - uses: org/ci-workflows/actions/deliver-artifact@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          artifact: ${{ steps.artifact.outputs.path }}
+          version: ${{ needs.resolve.outputs.version }}
+          stage: production
+          resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          feed-token: ${{ matrix.component['feed-token-secret'] && secrets[matrix.component['feed-token-secret']] || '' }}

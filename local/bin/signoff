@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# bin/signoff — record that this commit passed checks on a developer machine.
+#
+#   bin/signoff              sign off HEAD
+#   bin/signoff <sha>        sign off a specific commit
+#   bin/signoff --wait       retry until GitHub knows the commit (used by the hook)
+#   bin/signoff --state failure
+#
+# Posts a commit status, which is what the CI gate and branch protection look
+# for. The status is pinned to one SHA: a new commit has no signoff, so
+# amending or adding to a branch means running the checks again.
+#
+# This is deliberately weak enforcement. Nothing stops someone posting a
+# status without running anything — the point is to make the honest path the
+# easy one, not to make cheating impossible.
+#
+# Needs: gh, authenticated (gh auth login).
+
+set -euo pipefail
+
+CONTEXT="${CI_SIGNOFF_CONTEXT:-local/ci}"
+STATE=success
+WAIT=false
+SHA=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --state) STATE="${2:?}"; shift ;;
+    --wait)  WAIT=true ;;
+    --context) CONTEXT="${2:?}"; shift ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) SHA="$1" ;;
+  esac
+  shift
+done
+
+SHA="${SHA:-$(git rev-parse HEAD)}"
+command -v gh > /dev/null || { echo "gh is required: https://cli.github.com" >&2; exit 2; }
+
+REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+WHO="$(gh api user --jq .login)"
+
+post() {
+  gh api --method POST "repos/${REPO}/statuses/${SHA}" \
+    -f state="${STATE}" \
+    -f context="${CONTEXT}" \
+    -f description="${WHO} ran bin/ci locally" \
+    --silent
+}
+
+if [[ "${WAIT}" == true ]]; then
+  # A status can't be posted until GitHub has the commit, and pre-push runs
+  # before the objects arrive. Retry briefly rather than racing the push.
+  for i in $(seq 1 15); do
+    if post 2> /dev/null; then
+      echo "Signed off ${SHA:0:7} as ${CONTEXT}=${STATE}"
+      exit 0
+    fi
+    sleep 2
+  done
+  echo "Could not sign off ${SHA:0:7} — the push may have failed." >&2
+  echo "If it succeeded, run: bin/signoff ${SHA}" >&2
+  exit 1
+fi
+
+post
+echo "Signed off ${SHA:0:7} as ${CONTEXT}=${STATE}"

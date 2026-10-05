@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# .githooks/pre-push
+#
+# Runs before anything leaves your machine:
+#   1. is this branch's root current with main?
+#   2. do the checks pass? (lint, typecheck, unit tests, integration tests)
+# Then, once the push lands, records a signoff status against the pushed SHA.
+#
+# Enable with: git config core.hooksPath .githooks
+# Skip once with: git push --no-verify   (the CI gate will still catch it)
+#
+# git gives us one line per ref on stdin:
+#   <local ref> <local sha> <remote ref> <remote sha>
+
+set -uo pipefail
+
+MAIN="${CI_MAIN_BRANCH:-main}"
+REMOTE="${1:-origin}"
+ROOT="$(git rev-parse --show-toplevel)"
+cd "${ROOT}" || exit 1
+
+RED=$'\033[1;31m'; GREEN=$'\033[1;32m'; YELLOW=$'\033[1;33m'; GREY=$'\033[1;90m'; OFF=$'\033[0m'
+ZERO=0000000000000000000000000000000000000000
+
+PUSHED_SHA=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ "${local_sha}" == "${ZERO}" ]] && continue      # branch deletion
+  [[ "${local_ref}" == refs/tags/* ]] && continue    # tags aren't gated
+  PUSHED_SHA="${local_sha}"
+  PUSHED_REF="${local_ref}"
+done
+
+# Nothing to gate (tag push, deletion, or no refs).
+[[ -z "${PUSHED_SHA}" ]] && exit 0
+
+# Pushing main itself isn't gated here; main is protected server-side.
+if [[ "${PUSHED_REF}" == "refs/heads/${MAIN}" ]]; then
+  exit 0
+fi
+
+echo
+echo "${GREY}pre-push: checking branch is current with ${MAIN}${OFF}"
+
+git fetch --quiet --no-tags "${REMOTE}" "${MAIN}" 2> /dev/null || {
+  echo "${YELLOW}! could not fetch ${REMOTE}/${MAIN}; skipping the staleness check${OFF}"
+}
+
+if git rev-parse --verify --quiet "${REMOTE}/${MAIN}" > /dev/null; then
+  if ! git merge-base --is-ancestor "${REMOTE}/${MAIN}" "${PUSHED_SHA}"; then
+    BEHIND=$(git rev-list --count "${PUSHED_SHA}..${REMOTE}/${MAIN}")
+    echo
+    echo "${RED}✗ ${MAIN} has moved on — you are missing ${BEHIND} commit(s).${OFF}"
+    echo
+    echo "  Bring your branch up to date, then push again:"
+    echo "    ${GREY}git fetch ${REMOTE} && git rebase ${REMOTE}/${MAIN}${OFF}"
+    echo
+    echo "  Pushing anyway (not recommended): ${GREY}git push --no-verify${OFF}"
+    echo
+    exit 1
+  fi
+  echo "${GREEN}✓ up to date with ${REMOTE}/${MAIN}${OFF}"
+fi
+
+echo "${GREY}pre-push: running checks (lint, typecheck, unit, integration)${OFF}"
+echo
+
+if ! "${ROOT}/bin/ci" --fail-fast; then
+  echo
+  echo "${RED}✗ checks failed — nothing pushed.${OFF}"
+  echo "  Fix them, or push with ${GREY}--no-verify${OFF} to let CI judge."
+  echo
+  exit 1
+fi
+
+# The push hasn't happened yet, so the commit doesn't exist on GitHub and a
+# status would 422. Hand off to a background retry that posts it once the
+# objects land. If that misses, `bin/signoff <sha>` does it by hand.
+if [[ -x "${ROOT}/bin/signoff" ]] && command -v gh > /dev/null; then
+  ( "${ROOT}/bin/signoff" --wait "${PUSHED_SHA}" > /tmp/signoff-${PUSHED_SHA:0:7}.log 2>&1 & ) 
+  echo "${GREY}signoff for ${PUSHED_SHA:0:7} will post once the push lands${OFF}"
+fi
+
+exit 0

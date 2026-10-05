@@ -1,0 +1,86 @@
+name: 'Install toolchain'
+description: 'Installs and caches the toolchain for a component, then installs its locked dependencies'
+
+inputs:
+  component:
+    description: 'Component object as JSON'
+    required: true
+  node-version:
+    default: '22'
+  dotnet-version:
+    default: '9.0.x'
+  python-version:
+    default: '3.12'
+  registry-url:
+    description: 'npm registry to configure (package targets only)'
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Node covers TypeScript and plain JavaScript alike. npm is assumed:
+    # setup-node's npm cache needs package-lock.json.
+    - uses: actions/setup-node@v4
+      if: fromJSON(inputs.component).runtime == 'node'
+      with:
+        node-version: ${{ fromJSON(inputs.component).node-version || inputs.node-version }}
+        cache: npm
+        cache-dependency-path: ${{ fromJSON(inputs.component).path || '.' }}/package-lock.json
+        registry-url: ${{ inputs.registry-url }}
+
+    - uses: actions/setup-dotnet@v4
+      if: fromJSON(inputs.component).runtime == 'dotnet'
+      with:
+        dotnet-version: ${{ fromJSON(inputs.component).dotnet-version || inputs.dotnet-version }}
+
+    - uses: actions/setup-python@v5
+      if: fromJSON(inputs.component).runtime == 'python'
+      with:
+        python-version: ${{ fromJSON(inputs.component).python-version || inputs.python-version }}
+        cache: pip
+        cache-dependency-path: |
+          ${{ fromJSON(inputs.component).path || '.' }}/requirements*.txt
+          ${{ fromJSON(inputs.component).path || '.' }}/pyproject.toml
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ fromJSON(inputs.component).path || '.' }}
+      env:
+        C: ${{ inputs.component }}
+      run: |
+        set -euo pipefail
+        OVERRIDE="$(jq -r '.commands.install // empty' <<< "$C")"
+        if [[ -n "${OVERRIDE}" ]]; then
+          echo "+ ${OVERRIDE}"; eval "${OVERRIDE}"; exit 0
+        fi
+
+        case "$(jq -r '.runtime' <<< "$C")" in
+          node)
+            npm ci
+            ;;
+          dotnet)
+            # Restore every declared project in locked mode, test projects
+            # included, so nothing later falls back to an unlocked restore.
+            # Requires RestorePackagesWithLockFile + committed packages.lock.json.
+            for key in project test-project integration-tests; do
+              P="$(jq -r --arg k "$key" '.[$k] // empty' <<< "$C")"
+              if [[ -n "${P}" ]]; then
+                dotnet restore "${P}" --locked-mode
+              fi
+            done
+            ;;
+          python)
+            python -m pip install --quiet --upgrade pip
+            if [[ -f requirements.lock.txt ]]; then
+              pip install --require-hashes -r requirements.lock.txt
+            elif [[ -f requirements.txt ]]; then
+              echo "::warning::No requirements.lock.txt — installs are not hash-pinned."
+              pip install -r requirements.txt
+            elif [[ -f pyproject.toml ]]; then
+              pip install -e ".[dev]" || pip install -e .
+            fi
+            if [[ -f requirements-dev.txt ]]; then
+              pip install -r requirements-dev.txt
+            fi
+            ;;
+        esac

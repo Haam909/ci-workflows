@@ -1,0 +1,97 @@
+# .github/components.yml — component manifest, one per repo.
+#
+# Two independent axes:
+#
+#   runtime: dotnet | node | python     how it is built (node = TypeScript or JavaScript)
+#   target:  app-service | function | container | package    how it ships
+#
+# Any combination works. A Python Function and a C# Function deploy
+# identically; only the build differs.
+#
+# Optional per component:
+#   path                    working directory (node/python); defaults to repo root
+#   project                 .csproj path (dotnet)
+#   dockerfile              default "Dockerfile"
+#   test-project            dotnet unit test project
+#   integration-tests       dotnet integration test project; enables the integration job
+#   health-path             enables smoke test + automatic rollback on promote
+#   resource-group          overrides vars.AZURE_RESOURCE_GROUP
+#   feed                    package feed URL. Defaults to GitHub Packages for
+#                           nuget and npm; required for python.
+#   feed-token-secret       name of a secret holding the feed's token. Only
+#                           for feeds that are neither GitHub Packages nor
+#                           Azure Artifacts — those two authenticate from the
+#                           workflow's own OIDC identity.
+#   node-version / dotnet-version / python-version
+#   commands                override any default command (see below)
+
+components:
+  # C# API on App Service
+  - name: api
+    runtime: dotnet
+    target: app-service
+    project: src/Api/Api.csproj
+    test-project: tests/Api.Tests/Api.Tests.csproj
+    integration-tests: tests/Api.IntegrationTests/Api.IntegrationTests.csproj
+    app-test: contoso-api-test
+    app-prod: contoso-api
+    health-path: /health
+
+  # TypeScript front end on App Service
+  - name: web
+    runtime: node
+    target: app-service
+    path: src/web
+    app-test: contoso-web-test
+    app-prod: contoso-web
+    health-path: /
+
+  # Python Azure Function
+  - name: scraper
+    runtime: python
+    target: function
+    path: src/scraper
+    app-test: contoso-scraper-test
+    app-prod: contoso-scraper
+    commands:
+      test: pytest -m "not integration" --cov
+
+  # Python worker as a container
+  - name: worker
+    runtime: python
+    target: container
+    path: src/worker
+    dockerfile: src/worker/Dockerfile
+    app-test: contoso-worker-test
+    app-prod: contoso-worker
+    health-path: /healthz
+
+  # Shared C# library on Azure Artifacts
+  - name: contracts
+    runtime: dotnet
+    target: package
+    project: src/Contracts/Contracts.csproj
+    test-project: tests/Contracts.Tests/Contracts.Tests.csproj
+    feed: https://pkgs.dev.azure.com/contoso/_packaging/internal/nuget/v3/index.json
+
+  # TypeScript client on Azure Artifacts
+  - name: client
+    runtime: node
+    target: package
+    path: src/client
+    feed: https://pkgs.dev.azure.com/contoso/_packaging/internal/npm/registry/
+
+  # Python SDK on Azure Artifacts
+  - name: sdk
+    runtime: python
+    target: package
+    path: src/sdk
+    feed: https://pkgs.dev.azure.com/contoso/_packaging/internal/pypi/upload/
+
+  # A feed that isn't GitHub or Azure needs its token named explicitly
+  # - name: widget
+  #   runtime: node
+  #   target: package
+  #   path: src/widget
+  #   feed: https://registry.npmjs.org
+  #   feed-token-secret: NPMJS_TOKEN

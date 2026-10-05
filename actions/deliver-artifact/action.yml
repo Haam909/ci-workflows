@@ -1,0 +1,227 @@
+name: 'Deliver'
+description: >-
+  Delivers a built artifact to its target. Delivery depends only on target,
+  not on runtime — a Python Function and a C# Function deploy identically.
+
+inputs:
+  component:
+    required: true
+  artifact:
+    description: 'Path from the build action, or an image reference'
+    required: true
+  version:
+    required: true
+  stage:
+    description: 'test | production'
+    required: true
+  resource-group:
+    default: ''
+  github-token:
+    description: 'GITHUB_TOKEN, used when the feed is GitHub Packages'
+    default: ''
+  feed-token:
+    description: >-
+      Token for a feed that is neither GitHub Packages nor Azure Artifacts,
+      from the secret named by the component's feed-token-secret.
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # ---------- app-service ----------
+
+    - name: App Service (test)
+      if: fromJSON(inputs.component).target == 'app-service' && inputs.stage == 'test'
+      uses: azure/webapps-deploy@v3
+      with:
+        app-name: ${{ fromJSON(inputs.component).app-test }}
+        package: ${{ inputs.artifact }}
+
+    - name: App Service (staging slot)
+      if: fromJSON(inputs.component).target == 'app-service' && inputs.stage == 'production'
+      uses: azure/webapps-deploy@v3
+      with:
+        app-name: ${{ fromJSON(inputs.component).app-prod }}
+        slot-name: staging
+        package: ${{ inputs.artifact }}
+
+    # ---------- function ----------
+
+    - name: Function App (test)
+      if: fromJSON(inputs.component).target == 'function' && inputs.stage == 'test'
+      uses: Azure/functions-action@v1
+      with:
+        app-name: ${{ fromJSON(inputs.component).app-test }}
+        package: ${{ inputs.artifact }}
+
+    - name: Function App (staging slot)
+      if: fromJSON(inputs.component).target == 'function' && inputs.stage == 'production'
+      uses: Azure/functions-action@v1
+      with:
+        app-name: ${{ fromJSON(inputs.component).app-prod }}
+        slot-name: staging
+        package: ${{ inputs.artifact }}
+
+    # ---------- slot swap, health check, automatic rollback ----------
+
+    - name: Promote slot
+      if: (fromJSON(inputs.component).target == 'app-service' || fromJSON(inputs.component).target == 'function') && inputs.stage == 'production'
+      shell: bash
+      env:
+        C: ${{ inputs.component }}
+        RG: ${{ fromJSON(inputs.component).resource-group || inputs.resource-group }}
+      run: |
+        set -euo pipefail
+        APP="$(jq -r '.["app-prod"]' <<< "$C")"
+        HEALTH="$(jq -r '.["health-path"] // empty' <<< "$C")"
+
+        poll() {
+          local url="$1" tries="$2"
+          for i in $(seq 1 "${tries}"); do
+            if curl -fsS --max-time 10 "${url}" > /dev/null; then return 0; fi
+            echo "  attempt ${i}/${tries} failed"; sleep 10
+          done
+          return 1
+        }
+
+        if [[ -n "${HEALTH}" ]]; then
+          echo "Checking staging slot..."
+          poll "https://${APP}-staging.azurewebsites.net${HEALTH}" 12 \
+            || { echo "::error::Staging slot never became healthy — not swapping."; exit 1; }
+        fi
+
+        az webapp deployment slot swap -g "${RG}" -n "${APP}" \
+          --slot staging --target-slot production
+
+        if [[ -n "${HEALTH}" ]]; then
+          echo "Verifying production..."
+          if ! poll "https://${APP}.azurewebsites.net${HEALTH}" 6; then
+            echo "::error::Production unhealthy after swap — rolling back."
+            az webapp deployment slot swap -g "${RG}" -n "${APP}" \
+              --slot staging --target-slot production
+            exit 1
+          fi
+        fi
+        echo "Promoted ${APP}."
+
+    # ---------- container ----------
+
+    - name: Container App
+      if: fromJSON(inputs.component).target == 'container'
+      shell: bash
+      env:
+        C: ${{ inputs.component }}
+        IMAGE: ${{ inputs.artifact }}
+        RG: ${{ fromJSON(inputs.component).resource-group || inputs.resource-group }}
+        STAGE: ${{ inputs.stage }}
+      run: |
+        set -euo pipefail
+        if [[ "${STAGE}" == "test" ]]; then
+          APP="$(jq -r '.["app-test"]' <<< "$C")"
+        else
+          APP="$(jq -r '.["app-prod"]' <<< "$C")"
+        fi
+
+        # A new revision is created and traffic moves to it. Rollback is
+        # shifting traffic back to the previous revision, not a rebuild.
+        az containerapp update -g "${RG}" -n "${APP}" --image "${IMAGE}"
+
+        HEALTH="$(jq -r '.["health-path"] // empty' <<< "$C")"
+        if [[ -n "${HEALTH}" ]]; then
+          FQDN="$(az containerapp show -g "${RG}" -n "${APP}" --query 'properties.configuration.ingress.fqdn' -o tsv)"
+          for i in $(seq 1 12); do
+            curl -fsS --max-time 10 "https://${FQDN}${HEALTH}" > /dev/null && break
+            [[ "${i}" -eq 12 ]] && { echo "::error::${APP} unhealthy after update."; exit 1; }
+            sleep 10
+          done
+        fi
+
+    # ---------- package feeds ----------
+    #
+    # The feed is whatever the manifest says; it defaults to GitHub Packages
+    # for NuGet and npm. Credentials are derived from the feed's host, so no
+    # PAT is needed for GitHub Packages or Azure Artifacts.
+    #
+    # Feeds are immutable. A prerelease published from main is what consumers
+    # try before a stable version exists; a bad stable release is fixed by
+    # unlisting and shipping a patch, never by replacing the version.
+
+    - name: Publish package
+      if: fromJSON(inputs.component).target == 'package'
+      shell: bash
+      env:
+        C: ${{ inputs.component }}
+        ARTIFACT: ${{ inputs.artifact }}
+        STAGE: ${{ inputs.stage }}
+        GH_TOKEN_IN: ${{ inputs.github-token }}
+        FEED_TOKEN_IN: ${{ inputs.feed-token }}
+      run: |
+        set -euo pipefail
+        RUNTIME="$(jq -r '.runtime' <<< "$C")"
+        FEED="$(jq -r '.feed // empty' <<< "$C")"
+
+        # Default feed per runtime. GitHub Packages has no Python registry,
+        # so a Python package must name its feed explicitly.
+        if [[ -z "${FEED}" ]]; then
+          case "${RUNTIME}" in
+            dotnet) FEED="https://nuget.pkg.github.com/${GITHUB_REPOSITORY_OWNER}/index.json" ;;
+            node)   FEED="https://npm.pkg.github.com" ;;
+            python) echo "::error::Python packages need a 'feed' upload URL in the manifest."; exit 1 ;;
+          esac
+        fi
+
+        case "${FEED}" in
+          *pkgs.dev.azure.com*|*.visualstudio.com*)
+            # 499b84ac-... is the Azure DevOps resource ID. The token comes
+            # from the same OIDC login as the Azure deploys, so no PAT.
+            TOKEN="$(az account get-access-token \
+                       --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+                       --query accessToken -o tsv)"
+            echo "Feed: Azure Artifacts" ;;
+          *pkg.github.com*)
+            TOKEN="${GH_TOKEN_IN}"
+            echo "Feed: GitHub Packages" ;;
+          *)
+            if [[ -z "${FEED_TOKEN_IN}" ]]; then
+              echo "::error::${FEED} is not GitHub Packages or Azure Artifacts — set 'feed-token-secret' on the component to the name of a secret holding its token."
+              exit 1
+            fi
+            TOKEN="${FEED_TOKEN_IN}"
+            echo "Feed: custom (${FEED})" ;;
+        esac
+
+        case "${RUNTIME}" in
+          dotnet)
+            dotnet nuget add source "${FEED}" --name target \
+              --username ci --password "${TOKEN}" --store-password-in-clear-text
+            dotnet nuget push "${ARTIFACT}" --source target \
+              --api-key "${TOKEN}" --skip-duplicate
+            ;;
+          node)
+            TAG=latest
+            [[ "${STAGE}" == "test" ]] && TAG=alpha
+            # Written outside the repo so no token lands in the work tree.
+            NPMRC="${RUNNER_TEMP}/publish.npmrc"
+            {
+              printf 'registry=%s\n' "${FEED}"
+              printf '%s:_authToken=%s\n' "${FEED#https:}" "${TOKEN}"
+              printf 'always-auth=true\n'
+            } > "${NPMRC}"
+            npm_config_userconfig="${NPMRC}" \
+              npm publish "${ARTIFACT}" --tag "${TAG}" --registry "${FEED}"
+            rm -f "${NPMRC}"
+            ;;
+          python)
+            pip install --quiet twine
+            shopt -s nullglob
+            DIST="$(dirname "${ARTIFACT}")"
+            # Only the wheel and sdist — the release folder also holds SBOMs
+            # and signature bundles, which twine would reject.
+            FILES=( "${DIST}"/*.whl "${DIST}"/*.tar.gz )
+            if (( ${#FILES[@]} == 0 )); then
+              echo "::error::No wheel or sdist found in ${DIST}"; exit 1
+            fi
+            TWINE_USERNAME=ci TWINE_PASSWORD="${TOKEN}" \
+              twine upload --repository-url "${FEED}" --skip-existing "${FILES[@]}"
+            ;;
+        esac

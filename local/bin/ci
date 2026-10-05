@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# bin/ci — run this repo's checks on your own machine.
+#
+#   bin/ci                 the full gate: lint, typecheck, unit, integration
+#   bin/ci --quick         unit tests only — fast loop while coding, NOT a gate run
+#   bin/ci --install       install/restore dependencies first (slow; after a pull)
+#   bin/ci --only api      just one component
+#   bin/ci --fail-fast     stop at the first failure
+#
+# A plain `bin/ci` is what signoff attests to. The status carries no record of
+# which flags you used, so --quick is for iterating, never for signing off.
+#
+# Reads .github/components.yml, the same file the GitHub workflows read, so
+# what runs here is what runs there. Commands can be overridden per component
+# with a `commands:` block, and this script honours those too.
+#
+# Needs: bash, yq. Plus the toolchain for whatever your components use.
+
+set -uo pipefail
+
+MANIFEST="${CI_MANIFEST:-.github/components.yml}"
+QUICK=false; INSTALL=false; FAIL_FAST=false; ONLY=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --quick)      QUICK=true ;;
+    --install)    INSTALL=true ;;
+    --fail-fast|-f) FAIL_FAST=true ;;
+    --only)       ONLY="${2:-}"; shift ;;
+    -h|--help)    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+command -v yq > /dev/null || { echo "yq is required: brew install yq | winget install MikeFarah.yq" >&2; exit 2; }
+[[ -f "${MANIFEST}" ]] || { echo "no manifest at ${MANIFEST}" >&2; exit 2; }
+
+BOLD=$'\033[1m'; GREEN=$'\033[1;32m'; RED=$'\033[1;31m'; GREY=$'\033[1;90m'; OFF=$'\033[0m'
+RESULTS=(); FAILED=0; STARTED_ALL=$(date +%s)
+
+step() {                       # step <title> <command>
+  local title="$1" cmd="$2" started elapsed
+  printf '%s\n' "${GREY}── ${title}${OFF}"
+  started=$(date +%s)
+  if eval "${cmd}"; then
+    elapsed=$(( $(date +%s) - started ))
+    RESULTS+=("ok|${title}|${elapsed}")
+    printf '%s\n\n' "${GREEN}✓ ${title}${OFF} ${GREY}(${elapsed}s)${OFF}"
+  else
+    elapsed=$(( $(date +%s) - started ))
+    RESULTS+=("fail|${title}|${elapsed}")
+    FAILED=1
+    printf '%s\n\n' "${RED}✗ ${title}${OFF} ${GREY}(${elapsed}s)${OFF}"
+    [[ "${FAIL_FAST}" == true ]] && summary_and_exit
+  fi
+}
+
+summary_and_exit() {
+  local total=$(( $(date +%s) - STARTED_ALL ))
+  printf '%s\n' "${BOLD}Summary${OFF}"
+  for r in "${RESULTS[@]}"; do
+    IFS='|' read -r state title secs <<< "$r"
+    if [[ "$state" == ok ]]; then printf '  %s %s %s\n' "${GREEN}✓${OFF}" "$title" "${GREY}${secs}s${OFF}"
+    else printf '  %s %s %s\n' "${RED}✗${OFF}" "$title" "${GREY}${secs}s${OFF}"; fi
+  done
+  if [[ "${FAILED}" -eq 0 ]]; then
+    printf '%s\n' "${GREEN}All checks passed${OFF} ${GREY}(${total}s total)${OFF}"
+    exit 0
+  else
+    printf '%s\n' "${RED}Checks failed${OFF} ${GREY}(${total}s total)${OFF}"
+    exit 1
+  fi
+}
+
+if [[ "${QUICK}" == false ]] && grep -q 'integration' "${MANIFEST}"; then
+  if ! docker info > /dev/null 2>&1; then
+    echo "${RED}Docker is not running.${OFF} Integration tests need it (Testcontainers)." >&2
+    echo "Start Docker, or run ${GREY}bin/ci --quick${OFF} to skip them — which is not enough to sign off." >&2
+    exit 2
+  fi
+fi
+
+COUNT=$(yq '.components | length' "${MANIFEST}")
+for (( i=0; i<COUNT; i++ )); do
+  NAME=$(yq -r ".components[$i].name" "${MANIFEST}")
+  [[ -n "${ONLY}" && "${ONLY}" != "${NAME}" ]] && continue
+
+  RUNTIME=$(yq -r ".components[$i].runtime" "${MANIFEST}")
+  DIR=$(yq -r ".components[$i].path // \".\"" "${MANIFEST}")
+  PROJECT=$(yq -r ".components[$i].project // \"\"" "${MANIFEST}")
+  TESTPROJ=$(yq -r ".components[$i].\"test-project\" // \"\"" "${MANIFEST}")
+  C_INSTALL=$(yq -r ".components[$i].commands.install // \"\"" "${MANIFEST}")
+  C_LINT=$(yq -r ".components[$i].commands.lint // \"\"" "${MANIFEST}")
+  C_TYPE=$(yq -r ".components[$i].commands.typecheck // \"\"" "${MANIFEST}")
+  C_TEST=$(yq -r ".components[$i].commands.test // \"\"" "${MANIFEST}")
+  INTEGRATION=$(yq -r ".components[$i].\"integration-tests\" // \"\"" "${MANIFEST}")
+  C_ITEST=$(yq -r ".components[$i].commands.\"integration-test\" // \"\"" "${MANIFEST}")
+
+  if [[ "${INSTALL}" == true ]]; then
+    cmd="${C_INSTALL}"
+    if [[ -z "$cmd" ]]; then
+      case "${RUNTIME}" in
+        node)   cmd="npm ci" ;;
+        dotnet) cmd="dotnet restore \"${PROJECT}\" --locked-mode" ;;
+        python) cmd="if [ -f requirements.lock.txt ]; then pip install --require-hashes -r requirements.lock.txt; else pip install -r requirements.txt; fi" ;;
+      esac
+    fi
+    step "${NAME}: install" "(cd \"${DIR}\" && ${cmd})"
+  fi
+
+  if [[ "${QUICK}" == false ]]; then
+    cmd="${C_LINT}"
+    if [[ -z "$cmd" ]]; then
+      case "${RUNTIME}" in
+        node)   cmd="npm run lint --if-present" ;;
+        dotnet) cmd="dotnet format \"${PROJECT}\" --verify-no-changes --no-restore" ;;
+        python) cmd="ruff check . && ruff format --check ." ;;
+      esac
+    fi
+    step "${NAME}: lint" "(cd \"${DIR}\" && ${cmd})"
+
+    cmd="${C_TYPE}"
+    if [[ -z "$cmd" ]]; then
+      case "${RUNTIME}" in
+        node)   cmd="[ -f tsconfig.json ] && npx --no-install tsc --noEmit || echo 'no tsconfig; skipped'" ;;
+        dotnet) cmd="dotnet build \"${PROJECT}\" --no-restore -c Release -warnaserror" ;;
+        python) cmd="command -v mypy > /dev/null && mypy . || echo 'mypy not installed; skipped'" ;;
+      esac
+    fi
+    step "${NAME}: typecheck" "(cd \"${DIR}\" && ${cmd})"
+  fi
+
+  # Unit tests only — integration tests stay in CI, where Testcontainers has
+  # a predictable Docker daemon.
+  cmd="${C_TEST}"
+  if [[ -z "$cmd" ]]; then
+    case "${RUNTIME}" in
+      node)   cmd="CI=true npm test" ;;
+      python) cmd="pytest -m 'not integration'" ;;
+      dotnet)
+        if [[ -z "${TESTPROJ}" ]]; then
+          echo "${GREY}── ${NAME}: no test-project declared, skipping${OFF}"; continue
+        fi
+        cmd="dotnet test \"${TESTPROJ}\" -c Release --filter \"Category!=Integration\"" ;;
+    esac
+  fi
+  step "${NAME}: unit tests" "(cd \"${DIR}\" && ${cmd})"
+
+  # Integration tests run here too — they are the ones most likely to catch a
+  # real defect, so deferring them to a server defeats the point of the gate.
+  # Testcontainers starts its own databases against the local Docker daemon.
+  if [[ "${QUICK}" == false && ( -n "${INTEGRATION}" || -n "${C_ITEST}" ) ]]; then
+    cmd="${C_ITEST}"
+    if [[ -z "$cmd" ]]; then
+      case "${RUNTIME}" in
+        node)   cmd="npm run test:integration" ;;
+        python) cmd="pytest -m integration" ;;
+        dotnet) cmd="dotnet test \"${INTEGRATION}\" -c Release --filter \"Category=Integration\"" ;;
+      esac
+    fi
+    step "${NAME}: integration tests" "(cd \"${DIR}\" && ${cmd})"
+  fi
+done
+
+summary_and_exit

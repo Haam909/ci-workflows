@@ -1,0 +1,18 @@
+# .github/workflows/trigger-release.yml — calls reusable-release-to-production
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      major:
+        description: 'Force a major version bump (breaking change)'
+        type: boolean
+        default: false
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  ci:
+    uses: org/ci-workflows/.github/workflows/reusable-release-to-production.yml@v1
+    with:
+      major: ${{ inputs.major }}
+    secrets: inherit

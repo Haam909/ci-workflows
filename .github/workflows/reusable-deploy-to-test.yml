@@ -1,0 +1,113 @@
+# org/ci-workflows/.github/workflows/reusable-deploy-to-test.yml
+#
+# Reusable. On merge to main, builds every component and delivers it to test.
+# Delivery depends on target, not runtime:
+#
+#   app-service / function  ->  zip deploy to the test app
+#   container               ->  image pushed to ACR, test Container App updated
+#   package                 ->  prerelease published to the feed
+#
+# All of them run under `environment: test`, so a GitHub deployment record
+# exists either way and reusable-release-to-production.yml can read it to find the commit to ship.
+#
+# Versions here are prereleases (1.4.0-alpha.12). For packages that is the
+# point: consumers can try the change. For services it is just a build label,
+# and production gets a clean version from reusable-release-to-production.yml.
+
+name: deploy-to-test
+
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        type: string
+        default: '.github/components.yml'
+      node-version:
+        type: string
+        default: '22'
+      dotnet-version:
+        type: string
+        default: '9.0.x'
+      python-version:
+        type: string
+        default: '3.12'
+
+permissions:
+  contents: read
+  id-token: write
+  deployments: write
+  packages: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      components: ${{ steps.read.outputs.components }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: read
+        run: echo "components=$(yq -o=json -I=0 '.components' '${{ inputs.manifest }}')" >> "$GITHUB_OUTPUT"
+      - id: version
+        uses: org/ci-workflows/actions/derive-version@v1
+        with:
+          sha: ${{ github.sha }}
+          prerelease: 'true'
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  deliver:
+    needs: discover
+    runs-on: ubuntu-latest
+    environment:
+      name: test
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        component: ${{ fromJSON(needs.discover.outputs.components) }}
+    name: ${{ matrix.component.name }} -> test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: org/ci-workflows/actions/install-toolchain@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          node-version: ${{ inputs.node-version }}
+          dotnet-version: ${{ inputs.dotnet-version }}
+          python-version: ${{ inputs.python-version }}
+
+      # Services always need Azure. Packages need it only when their feed is
+      # Azure Artifacts, to mint the feed token.
+      - uses: azure/login@v2
+        if: matrix.component.target != 'package' || contains(matrix.component.feed || '', 'pkgs.dev.azure.com') || contains(matrix.component.feed || '', 'visualstudio.com')
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        if: matrix.component.target == 'container'
+        run: az acr login --name "${{ vars.ACR_NAME }}"
+
+      - id: build
+        uses: org/ci-workflows/actions/build-artifact@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          version: ${{ needs.discover.outputs.version }}
+          registry: ${{ vars.ACR_NAME && format('{0}.azurecr.io', vars.ACR_NAME) || '' }}
+
+      - uses: org/ci-workflows/actions/deliver-artifact@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          artifact: ${{ steps.build.outputs.artifact }}
+          version: ${{ needs.discover.outputs.version }}
+          stage: test
+          resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          feed-token: ${{ matrix.component['feed-token-secret'] && secrets[matrix.component['feed-token-secret']] || '' }}
+
+      - name: Summary
+        run: |
+          echo "- **${{ matrix.component.name }}** (${{ matrix.component.runtime }} → ${{ matrix.component.target }}) \`${{ needs.discover.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"

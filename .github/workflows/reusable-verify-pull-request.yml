@@ -1,0 +1,81 @@
+# org/ci-workflows/.github/workflows/reusable-verify-pull-request.yml
+#
+# Reusable PR gate. Two cheap checks, no toolchains, no matrix: the tests
+# themselves ran on the developer's machine before the push (see LOCAL-GATE.md).
+# Nothing here deploys or publishes.
+
+name: verify-pull-request
+
+on:
+  workflow_call:
+    inputs:
+      require-local-signoff:
+        description: >-
+          Require a green local/ci commit status, posted by the developer's
+          pre-push hook.
+        type: boolean
+        default: true
+      signoff-context:
+        type: string
+        default: 'local/ci'
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: read
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # The hook checked this before the push, but main can move between a
+      # push and a merge, so it is enforced here rather than just advised.
+      - name: Branch must be current with main
+        run: |
+          set -euo pipefail
+          git fetch --quiet --no-tags origin main
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            BEHIND=$(git rev-list --count HEAD..origin/main)
+            echo "::error::main has moved on by ${BEHIND} commit(s). Rebase, re-run bin/ci, and push again."
+            exit 1
+          fi
+          echo "Current with main."
+
+      # The developer machine ran the checks; this confirms it happened for
+      # this exact commit. A new commit has no signoff.
+      - name: Local checks must be signed off for this commit
+        if: inputs.require-local-signoff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CTX: ${{ inputs.signoff-context }}
+        run: |
+          set -euo pipefail
+          SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          STATE="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/statuses" \
+                     --jq "[.[] | select(.context == \"${CTX}\")] | first | .state // empty")"
+          if [[ "${STATE}" != "success" ]]; then
+            echo "::error::No green '${CTX}' status on ${SHA:0:7} (found: ${STATE:-none})."
+            echo "::error::Run ./bin/ci locally, then ./bin/signoff ${SHA}"
+            exit 1
+          fi
+          echo "Signed off locally."
+
+  branch-name:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch prefix
+        run: |
+          case "${{ github.head_ref }}" in
+            breaking/*|feature/*|feat/*|fix/*|hotfix/*|bugfix/*|chore/*|docs/*|refactor/*|test/*|ci/*|build/*|perf/*|deps/*|dependabot/*)
+              echo "OK: ${{ github.head_ref }}" ;;
+            *)
+              echo "::error::Branch '${{ github.head_ref }}' has no recognised prefix. Version derivation needs one."
+              exit 1 ;;
+          esac

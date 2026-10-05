@@ -1,0 +1,14 @@
+# .github/workflows/trigger-pull-request.yml — calls reusable-verify-pull-request
+name: Pull request
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+    branches: [main]
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  ci:
+    uses: org/ci-workflows/.github/workflows/reusable-verify-pull-request.yml@v1
+    secrets: inherit

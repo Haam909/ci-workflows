@@ -1,0 +1,12 @@
+# .github/workflows/trigger-merge-to-main.yml — calls reusable-deploy-to-test
+name: Merge to main
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: main
+  cancel-in-progress: false
+jobs:
+  ci:
+    uses: org/ci-workflows/.github/workflows/reusable-deploy-to-test.yml@v1
+    secrets: inherit

@@ -1,0 +1,150 @@
+name: 'Build artifact'
+description: >-
+  Builds a component, stamps it with the version, and produces what its
+  target needs: a zip (app-service, function), a package file (package), or
+  a pushed image (container).
+
+inputs:
+  component:
+    required: true
+  version:
+    required: true
+  registry:
+    description: 'ACR login server, e.g. contoso.azurecr.io (container target)'
+    default: ''
+
+outputs:
+  artifact:
+    description: 'Path to the produced file, or the image reference for containers'
+    value: ${{ steps.build.outputs.artifact }}
+
+runs:
+  using: composite
+  steps:
+    - id: build
+      shell: bash
+      env:
+        C: ${{ inputs.component }}
+        VERSION: ${{ inputs.version }}
+        REGISTRY: ${{ inputs.registry }}
+        STAMP_PY: ${{ github.action_path }}/stamp-python-version.py
+      run: |
+        set -euo pipefail
+
+        NAME="$(jq -r '.name' <<< "$C")"
+        RUNTIME="$(jq -r '.runtime' <<< "$C")"
+        TARGET="$(jq -r '.target' <<< "$C")"
+        DIR="$(jq -r '.path // "."' <<< "$C")"
+        PROJECT="$(jq -r '.project // empty' <<< "$C")"
+
+        # Kept apart from the component's own tree: a node component at the
+        # repo root builds into ./dist, which must not collide with ours.
+        OUT="${GITHUB_WORKSPACE}/_artifacts"
+        STAGE="${RUNNER_TEMP}/stage/${NAME}"
+        mkdir -p "${OUT}" "${STAGE}"
+
+        copy_tree() {
+          tar -C "$1" \
+            --exclude=./.git --exclude=./node_modules --exclude=./_artifacts \
+            --exclude=./.venv --exclude=./venv --exclude='__pycache__' \
+            -cf - . | tar -C "${STAGE}" -xf -
+        }
+
+        # ---------- stamp the version ----------
+        case "${RUNTIME}" in
+          node)
+            (cd "${DIR}" && npm version "${VERSION}" --no-git-tag-version --allow-same-version)
+            ;;
+          python)
+            # PEP 440 spells the prerelease 1.4.0a12, not 1.4.0-alpha.12.
+            PY_VERSION="$(sed -E 's/-alpha\.([0-9]+)$/a\1/' <<< "${VERSION}")"
+            export SETUPTOOLS_SCM_PRETEND_VERSION="${PY_VERSION}"
+            if [[ -f "${DIR}/pyproject.toml" ]]; then
+              python3 "${STAMP_PY}" "${DIR}/pyproject.toml" "${PY_VERSION}"
+            fi
+            ;;
+        esac
+
+        # ---------- container: same path for every runtime ----------
+        if [[ "${TARGET}" == "container" ]]; then
+          [[ -n "${REGISTRY}" ]] || { echo "::error::container target needs a registry"; exit 1; }
+          IMAGE="${REGISTRY}/${NAME}:${VERSION}"
+          docker build \
+            --build-arg "VERSION=${VERSION}" \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            -f "$(jq -r '.dockerfile // "Dockerfile"' <<< "$C")" \
+            -t "${IMAGE}" "${DIR}"
+          docker push "${IMAGE}"
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}")"
+          echo "artifact=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${DIGEST}"
+          exit 0
+        fi
+
+        # ---------- package ----------
+        if [[ "${TARGET}" == "package" ]]; then
+          case "${RUNTIME}" in
+            dotnet)
+              dotnet pack "${PROJECT}" -c Release --no-restore -o "${OUT}" -p:Version="${VERSION}"
+              echo "artifact=$(ls "${OUT}"/*.nupkg | head -1)" >> "$GITHUB_OUTPUT"
+              ;;
+            node)
+              (cd "${DIR}" && npm run build --if-present && npm pack --pack-destination "${OUT}")
+              echo "artifact=$(ls "${OUT}"/*.tgz | head -1)" >> "$GITHUB_OUTPUT"
+              ;;
+            python)
+              pip install --quiet build
+              (cd "${DIR}" && python -m build --outdir "${OUT}")
+              echo "artifact=$(ls "${OUT}"/*.whl | head -1)" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+          exit 0
+        fi
+
+        # ---------- app-service / function ----------
+        case "${RUNTIME}" in
+          dotnet)
+            dotnet publish "${PROJECT}" -c Release --no-restore \
+              -o "${STAGE}" -p:Version="${VERSION}"
+            ;;
+          node)
+            # Node on App Service and Functions starts from package.json, so
+            # ship the built tree plus production node_modules — the compiled
+            # output alone won't start.
+            (cd "${DIR}" && npm run build --if-present)
+            copy_tree "${DIR}"
+            (cd "${STAGE}" && npm ci --omit=dev)
+            ;;
+          python)
+            copy_tree "${DIR}"
+            if [[ "${TARGET}" == "function" ]]; then
+              # Functions load dependencies from .python_packages.
+              SITE="${STAGE}/.python_packages/lib/site-packages"
+              if [[ -f "${STAGE}/requirements.lock.txt" ]]; then
+                pip install --require-hashes --target="${SITE}" -r "${STAGE}/requirements.lock.txt"
+              elif [[ -f "${STAGE}/requirements.txt" ]]; then
+                pip install --target="${SITE}" -r "${STAGE}/requirements.txt"
+              else
+                pip install --target="${SITE}" "${STAGE}"
+              fi
+            else
+              # App Service installs requirements.txt itself (Oryx), and does
+              # not read .python_packages. Hand it the hash-pinned lock so
+              # that install is deterministic.
+              if [[ -f "${STAGE}/requirements.lock.txt" ]]; then
+                cp "${STAGE}/requirements.lock.txt" "${STAGE}/requirements.txt"
+              fi
+              if [[ ! -f "${STAGE}/requirements.txt" ]]; then
+                echo "::error::Python on App Service needs requirements.txt or requirements.lock.txt"
+                exit 1
+              fi
+            fi
+            ;;
+        esac
+
+        ZIP="${OUT}/${NAME}-${VERSION}.zip"
+        (cd "${STAGE}" && zip -qr "${ZIP}" . -x '*.pyc')
+        echo "artifact=${ZIP}" >> "$GITHUB_OUTPUT"
+        echo "Built ${ZIP}"

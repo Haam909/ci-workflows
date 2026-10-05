@@ -1,0 +1,106 @@
+name: 'Derive next version'
+description: >-
+  Derives the next semver from the branch prefixes of PRs merged since the
+  last release tag. Optionally appends a prerelease suffix.
+
+inputs:
+  sha:
+    description: 'Commit to derive for'
+    required: true
+  force-major:
+    default: 'false'
+  prerelease:
+    description: 'Append -alpha.<commits-since-tag>'
+    default: 'false'
+  token:
+    description: 'Token with pull-requests:read'
+    required: true
+
+outputs:
+  version:
+    description: 'Bare version, e.g. 1.4.0 or 1.4.0-alpha.12'
+    value: ${{ steps.derive.outputs.version }}
+  previous-tag:
+    description: 'The tag it derived from'
+    value: ${{ steps.derive.outputs.previous }}
+  bump:
+    description: 'major | minor | patch'
+    value: ${{ steps.derive.outputs.bump }}
+
+runs:
+  using: composite
+  steps:
+    - id: derive
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        TARGET_SHA: ${{ inputs.sha }}
+        FORCE_MAJOR: ${{ inputs.force-major }}
+        PRERELEASE: ${{ inputs.prerelease }}
+      run: |
+        set -euo pipefail
+
+        PREV_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${TARGET_SHA}" 2>/dev/null || true)"
+
+        if [[ -z "${PREV_TAG}" ]]; then
+          echo "::notice::No previous version tag; seeding at 0.1.0"
+          MAJOR=0; MINOR=1; PATCH=0; BUMP=minor; HEIGHT=0
+          PREV_TAG="(none)"
+        else
+          BASE="${PREV_TAG#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${BASE%%-*}"
+
+          COMMITS="$(git log --format=%H "${PREV_TAG}..${TARGET_SHA}")"
+          HEIGHT="$(printf '%s' "${COMMITS}" | grep -c . || true)"
+
+          if [[ "${HEIGHT}" -eq 0 ]]; then
+            echo "::error::No commits between ${PREV_TAG} and ${TARGET_SHA:0:7} - nothing to release."
+            exit 1
+          fi
+
+          rank() { case "$1" in major) echo 3;; minor) echo 2;; patch) echo 1;; *) echo 0;; esac; }
+          BUMP="none"; SEEN=""
+
+          while read -r sha; do
+            [[ -z "${sha}" ]] && continue
+            refs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" \
+                      --jq '.[].head.ref' 2>/dev/null || true)"
+            if [[ -z "${refs}" ]]; then
+              echo "::warning::${sha:0:7} has no associated PR - direct push? Treating as patch."
+              refs="(direct-push)"
+            fi
+            while read -r ref; do
+              [[ -z "${ref}" ]] && continue
+              case "${ref}" in
+                breaking/*)                      this=major ;;
+                feature/*|feat/*)                this=minor ;;
+                fix/*|hotfix/*|bugfix/*)         this=patch ;;
+                chore/*|docs/*|refactor/*|test/*|ci/*|build/*|perf/*|deps/*|dependabot/*)
+                                                 this=patch ;;
+                *) echo "::warning::Unrecognised prefix '${ref}' on ${sha:0:7}; treating as patch."
+                   this=patch ;;
+              esac
+              SEEN+="  ${this}  ${ref}"$'\n'
+              if (( $(rank "${this}") > $(rank "${BUMP}") )); then BUMP="${this}"; fi
+            done <<< "${refs}"
+          done <<< "${COMMITS}"
+
+          { echo "Branches merged since ${PREV_TAG}:"; printf '%s' "${SEEN}" | sort -u; }
+
+          [[ "${FORCE_MAJOR}" == "true" ]] && { echo "::notice::Major bump forced."; BUMP=major; }
+
+          case "${BUMP}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+            none)  echo "::error::Could not determine a bump."; exit 1 ;;
+          esac
+        fi
+
+        VERSION="${MAJOR}.${MINOR}.${PATCH}"
+        [[ "${PRERELEASE}" == "true" ]] && VERSION="${VERSION}-alpha.${HEIGHT}"
+
+        echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+        echo "previous=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+        echo "bump=${BUMP}"         >> "$GITHUB_OUTPUT"
+        echo "Resolved ${PREV_TAG} + ${BUMP} -> ${VERSION}"
