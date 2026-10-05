@@ -92,7 +92,7 @@ git push -u origin main
 The files ship with a placeholder org called `org`. Replace it:
 
 ```bash
-grep -rl 'org/ci-workflows' . | xargs sed -i 's#org/ci-workflows#YOURNAME/ci-workflows#g'
+grep -rl 'Haam909/ci-workflows' . | xargs sed -i 's#Haam909/ci-workflows#YOURNAME/ci-workflows#g'
 git commit -am "ci: point at this account"
 git push
 ```
@@ -136,7 +136,7 @@ project to your repo root. You should end up with:
 .github/workflows/trigger-release.yml
 ```
 
-Edit all four to replace `org/ci-workflows` with `YOURNAME/ci-workflows`.
+Edit all four to replace `Haam909/ci-workflows` with `YOURNAME/ci-workflows`.
 
 **To start with, delete `trigger-merge-to-main.yml` and
 `trigger-release.yml`.** Get pull request checks working first. Add them back

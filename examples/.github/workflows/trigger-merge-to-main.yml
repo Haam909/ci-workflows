@@ -8,5 +8,5 @@ concurrency:
   cancel-in-progress: false
 jobs:
   ci:
-    uses: org/ci-workflows/.github/workflows/reusable-deploy-to-test.yml@v1
+    uses: Haam909/ci-workflows/.github/workflows/reusable-deploy-to-test.yml@v1
     secrets: inherit

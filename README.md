@@ -253,7 +253,7 @@ Consumers pin `@v1`. Move `v1` forward for compatible changes; cut `v2` for
 anything needing manifest changes — thirty repos means a breaking change here
 is thirty PRs, so prefer additive keys with defaults.
 
-Note the `org/ci-workflows/...@v1` references inside the workflows and the
+Note the `Haam909/ci-workflows/...@v1` references inside the workflows and the
 README need your real org name substituted.
 
 ## Known limits

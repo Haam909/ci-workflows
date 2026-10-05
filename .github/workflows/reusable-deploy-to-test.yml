@@ -1,4 +1,4 @@
-# org/ci-workflows/.github/workflows/reusable-deploy-to-test.yml
+# Haam909/ci-workflows/.github/workflows/reusable-deploy-to-test.yml
 #
 # Reusable. On merge to main, builds every component and delivers it to test.
 # Delivery depends on target, not runtime:
@@ -51,7 +51,7 @@ jobs:
       - id: read
         run: echo "components=$(yq -o=json -I=0 '.components' '${{ inputs.manifest }}')" >> "$GITHUB_OUTPUT"
       - id: version
-        uses: org/ci-workflows/actions/derive-version@v1
+        uses: Haam909/ci-workflows/actions/derive-version@v1
         with:
           sha: ${{ github.sha }}
           prerelease: 'true'
@@ -71,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: org/ci-workflows/actions/install-toolchain@v1
+      - uses: Haam909/ci-workflows/actions/install-toolchain@v1
         with:
           component: ${{ toJSON(matrix.component) }}
           node-version: ${{ inputs.node-version }}
@@ -92,13 +92,13 @@ jobs:
         run: az acr login --name "${{ vars.ACR_NAME }}"
 
       - id: build
-        uses: org/ci-workflows/actions/build-artifact@v1
+        uses: Haam909/ci-workflows/actions/build-artifact@v1
         with:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ needs.discover.outputs.version }}
           registry: ${{ vars.ACR_NAME && format('{0}.azurecr.io', vars.ACR_NAME) || '' }}
 
-      - uses: org/ci-workflows/actions/deliver-artifact@v1
+      - uses: Haam909/ci-workflows/actions/deliver-artifact@v1
         with:
           component: ${{ toJSON(matrix.component) }}
           artifact: ${{ steps.build.outputs.artifact }}

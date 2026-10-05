@@ -1,4 +1,4 @@
-# org/ci-workflows/.github/workflows/reusable-verify-pull-request.yml
+# Haam909/ci-workflows/.github/workflows/reusable-verify-pull-request.yml
 #
 # Reusable PR gate. Two cheap checks, no toolchains, no matrix: the tests
 # themselves ran on the developer's machine before the push (see LOCAL-GATE.md).

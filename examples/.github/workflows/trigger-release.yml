@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   ci:
-    uses: org/ci-workflows/.github/workflows/reusable-release-to-production.yml@v1
+    uses: Haam909/ci-workflows/.github/workflows/reusable-release-to-production.yml@v1
     with:
       major: ${{ inputs.major }}
     secrets: inherit
