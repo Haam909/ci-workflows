@@ -1,8 +1,8 @@
 # .github/workflows/trigger-pull-request.yml — calls reusable-verify-pull-request
 name: Pull request
+# pull_request only. A push trigger as well would report every check twice per
+# SHA, and its skipped branch-name job counts as 'Success' for a required check.
 on:
-  push:
-    branches-ignore: [main]
   pull_request:
     branches: [main]
 concurrency:
