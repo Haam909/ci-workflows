@@ -412,7 +412,9 @@ wrong folder.
 
 **NU1004, or "packages.lock.json … is inconsistent"**
 The C# lock file is missing or stale. `dotnet restore --use-lock-file`, then
-commit the result.
+commit the result. Changing a project's `PackageId` or adding a project
+reference does this: the test project's lock file names its references by
+package ID. `bin/ci` shows it as a failed `restore (locked)` step.
 
 **The run fails instantly with "This run likely failed because of a workflow file issue"**
 That's all `gh run view` says. Open the run page in the browser for the real

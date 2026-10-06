@@ -83,6 +83,11 @@ Steps that don't apply:
   whenever it's installed and prints "mypy not installed; skipped" otherwise.
 - **dotnet** — no `test-project` declared skips that component's unit **and**
   integration tests, with a message.
+- **dotnet** — a plain `bin/ci` (no `--install`) still starts with a locked
+  restore of every declared project, the same one CI runs, and the test steps
+  use `--no-restore`. Otherwise `dotnet test`'s own unlocked restore would
+  quietly rewrite a stale `packages.lock.json` and pass, and the merge would
+  fail with NU1004.
 
 ```yaml
 commands:

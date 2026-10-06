@@ -160,7 +160,8 @@ model needs more than that, don't use this.
 **Green locally isn't green everywhere.** A developer on a different SDK
 patch, a different Python version, or with stale dependencies can sign off on
 a run that would fail on a clean machine. `bin/ci --install` before signing
-off reduces it; running `bin/ci` in CI as well would remove it, at the cost
+off reduces it (for dotnet the locked restore runs on every `bin/ci`, so a
+stale `packages.lock.json` always fails locally); running `bin/ci` in CI as well would remove it, at the cost
 of runner time. That isn't set up.
 
 **Status is per-SHA.** Amend a commit, rebase, or push one more fix and the

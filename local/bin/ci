@@ -97,16 +97,31 @@ for (( i=0; i<COUNT; i++ )); do
   INTEGRATION=$(yq -r ".components[$i].\"integration-tests\" // \"\"" "${MANIFEST}")
   C_ITEST=$(yq -r ".components[$i].commands.\"integration-test\" // \"\"" "${MANIFEST}")
 
+  # Every dotnet project CI restores, in locked mode (install-toolchain).
+  RESTORE=""
+  if [[ "${RUNTIME}" == dotnet ]]; then
+    for P in "${PROJECT}" "${TESTPROJ}" "${INTEGRATION}"; do
+      [[ -n "${P}" ]] && RESTORE+="${RESTORE:+ && }dotnet restore \"${P}\" --locked-mode"
+    done
+  fi
+
   if [[ "${INSTALL}" == true ]]; then
     cmd="${C_INSTALL}"
     if [[ -z "$cmd" ]]; then
       case "${RUNTIME}" in
         node)   cmd="npm ci" ;;
-        dotnet) cmd="dotnet restore \"${PROJECT}\" --locked-mode" ;;
+        dotnet) cmd="${RESTORE}" ;;
         python) cmd="if [ -f requirements.lock.txt ]; then pip install --require-hashes -r requirements.lock.txt; else pip install -r requirements.txt; fi" ;;
       esac
     fi
     step "${NAME}: install" "(cd \"${DIR}\" && ${cmd})"
+  fi
+
+  # dotnet commands restore first unless told not to, and that restore is
+  # unlocked: it rewrites a stale packages.lock.json and passes, where CI's
+  # locked restore fails. So restore locked here and keep later steps off it.
+  if [[ "${RUNTIME}" == dotnet && "${INSTALL}" == false && -n "${RESTORE}" ]]; then
+    step "${NAME}: restore (locked)" "(cd \"${DIR}\" && ${RESTORE})"
   fi
 
   if [[ "${QUICK}" == false ]]; then
@@ -141,7 +156,7 @@ for (( i=0; i<COUNT; i++ )); do
         if [[ -z "${TESTPROJ}" ]]; then
           echo "${GREY}── ${NAME}: no test-project declared, skipping${OFF}"; continue
         fi
-        cmd="dotnet test \"${TESTPROJ}\" -c Release --filter \"Category!=Integration\"" ;;
+        cmd="dotnet test \"${TESTPROJ}\" -c Release --no-restore --filter \"Category!=Integration\"" ;;
     esac
   fi
   step "${NAME}: unit tests" "(cd \"${DIR}\" && ${cmd})"
@@ -155,7 +170,7 @@ for (( i=0; i<COUNT; i++ )); do
       case "${RUNTIME}" in
         node)   cmd="npm run test:integration" ;;
         python) cmd="pytest -m integration" ;;
-        dotnet) cmd="dotnet test \"${INTEGRATION}\" -c Release --filter \"Category=Integration\"" ;;
+        dotnet) cmd="dotnet test \"${INTEGRATION}\" -c Release --no-restore --filter \"Category=Integration\"" ;;
       esac
     fi
     step "${NAME}: integration tests" "(cd \"${DIR}\" && ${cmd})"
