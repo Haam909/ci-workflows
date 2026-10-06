@@ -91,12 +91,20 @@ jobs:
           git merge-base --is-ancestor "${SHA}" origin/main \
             || { echo "::error::${SHA} is not an ancestor of main."; exit 1; }
 
-          # Versions only move forward: a commit at or behind the latest
-          # release would derive a version that already exists.
+          # Versions only move forward: the commit must contain the latest
+          # release. A commit at or behind it would derive a version that
+          # already exists; one on a branch that forked before it (and merged
+          # after) would ship without that release's changes.
           LATEST="$(git describe --tags --abbrev=0 --match 'v[0-9]*' origin/main 2>/dev/null || true)"
-          if [[ -n "${LATEST}" ]] && git merge-base --is-ancestor "${SHA}" "${LATEST}"; then
-            echo "::error::${SHA:0:7} is already included in ${LATEST}. Choose a commit after it."
-            exit 1
+          if [[ -n "${LATEST}" ]]; then
+            if git merge-base --is-ancestor "${SHA}" "${LATEST}"; then
+              echo "::error::${SHA:0:7} is already included in ${LATEST}. Choose a commit after it."
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "${LATEST}" "${SHA}"; then
+              echo "::error::${SHA:0:7} does not contain ${LATEST}: it branched off before that release. Choose a commit on main after it."
+              exit 1
+            fi
           fi
 
           if [[ -n "${CREATED}" ]]; then
