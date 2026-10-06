@@ -281,13 +281,38 @@ jobs:
     name: promote ${{ matrix.component.name }}
     needs: [resolve, publish]
     runs-on: ubuntu-latest
+    # deployment: false stops GitHub recording this job against the commit the
+    # run was dispatched from (main's head), which isn't the commit being
+    # shipped when a sha is chosen. The steps below record the real one.
     environment:
       name: production
+      deployment: false
     strategy:
       fail-fast: false
       matrix:
         component: ${{ fromJSON(needs.resolve.outputs.components) }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      - name: Record deployment of the released commit
+        id: record
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          NAME: ${{ matrix.component.name }}
+        run: |
+          set -euo pipefail
+          ID="$(jq -n --arg ref "${SHA}" --arg c "${NAME}" --arg v "${VERSION}" \
+                  '{ref: $ref, environment: "production", production_environment: true,
+                    auto_merge: false, required_contexts: [],
+                    description: "\($c) v\($v)", payload: {component: $c, version: $v}}' \
+                | gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" --input - --jq .id)"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${ID}/statuses" \
+            -f state=in_progress -f log_url="${RUN_URL}" --silent
+          echo "id=${ID}" >> "$GITHUB_OUTPUT"
+          echo "Deployment ${ID}: ${NAME} v${VERSION} at ${SHA}"
+
       - uses: actions/download-artifact@v4
         with:
           name: release-${{ matrix.component.name }}
@@ -341,6 +366,16 @@ jobs:
           resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           feed-token: ${{ matrix.component['feed-token-secret'] && secrets[matrix.component['feed-token-secret']] || '' }}
+
+      - name: Record deployment result
+        if: always() && steps.record.outputs.id != ''
+        env:
+          ID: ${{ steps.record.outputs.id }}
+          STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${ID}/statuses" \
+            -f state="${STATE}" -f log_url="${RUN_URL}" --silent
+          echo "Deployment ${ID}: ${STATE}"
 
   go-live:
     name: publish release
