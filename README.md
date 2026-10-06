@@ -130,12 +130,14 @@ to begin somewhere else — that's the only manual tag in the system.
 4. Rebuilds every component from that commit stamped with the version,
    generates CycloneDX SBOMs, signs with keyless cosign, attests provenance.
    Container images are signed by digest in the registry.
-5. Creates the GitHub Release as a **draft with assets**, then pushes the tag,
-   then publishes. A failed upload leaves no orphan tag.
+5. Creates the GitHub Release as a **draft with assets**, then pushes the tag.
+   A failed upload leaves no orphan tag.
 6. Promotes. App Services and Functions deploy to the staging slot, smoke
    test, swap, verify, and swap back automatically if production fails its
    health check. Containers get a new revision. Packages publish the stable
    version.
+7. Publishes the draft release, only once every component promoted. A failed
+   promote leaves the tag and a draft; re-run the failed jobs to finish.
 
 ## Onboarding a repo
 

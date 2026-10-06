@@ -7,7 +7,10 @@
 #
 # Ordering note: the GitHub Release is created as a draft with every asset
 # attached, and the tag is pushed only after those uploads succeed. A failed
-# upload therefore leaves no orphan tag behind.
+# upload therefore leaves no orphan tag behind. The draft is published only
+# after every component has been promoted, so a public release always means
+# it is live; a failed promote leaves the tag and a draft, and re-running the
+# failed jobs finishes the release.
 
 name: release-to-production
 
@@ -239,7 +242,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: tag and publish
+    name: tag and draft release
     needs: [resolve, build]
     runs-on: ubuntu-latest
     env:
@@ -273,9 +276,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v${VERSION}" "${TARGET_SHA}" -m "Release v${VERSION}"
           git push origin "v${VERSION}"
-
-      - name: Publish release
-        run: gh release edit "v${VERSION}" --draft=false
 
   promote:
     name: promote ${{ matrix.component.name }}
@@ -341,3 +341,13 @@ jobs:
           resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           feed-token: ${{ matrix.component['feed-token-secret'] && secrets[matrix.component['feed-token-secret']] || '' }}
+
+  go-live:
+    name: publish release
+    needs: [resolve, promote]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Publish release
+        run: gh release edit "v${{ needs.resolve.outputs.version }}" --draft=false -R "${GITHUB_REPOSITORY}"
