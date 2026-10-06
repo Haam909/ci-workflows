@@ -210,8 +210,10 @@ runs:
               printf '%s:_authToken=%s\n' "${REGISTRY#https:}" "${TOKEN}"
               printf 'always-auth=true\n'
             } > "${NPMRC}"
+            # A relative "dir/file.tgz" reads to npm as a GitHub owner/repo
+            # spec, so always hand it an absolute path.
             npm_config_userconfig="${NPMRC}" \
-              npm publish "${ARTIFACT}" --tag "${TAG}" --registry "${REGISTRY}"
+              npm publish "$(realpath "${ARTIFACT}")" --tag "${TAG}" --registry "${REGISTRY}"
             rm -f "${NPMRC}"
             ;;
           python)
