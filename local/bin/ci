@@ -74,9 +74,10 @@ summary_and_exit() {
 }
 
 if [[ "${QUICK}" == false ]] && grep -q 'integration' "${MANIFEST}"; then
-  if ! docker info > /dev/null 2>&1; then
-    echo "${RED}Docker is not running.${OFF} Integration tests need it (Testcontainers)." >&2
-    echo "Start Docker, or run ${GREY}bin/ci --quick${OFF} to skip them — which is not enough to sign off." >&2
+  # Podman serves the same API Testcontainers talks to, so either will do.
+  if ! { docker info || podman info; } > /dev/null 2>&1; then
+    echo "${RED}Neither Docker nor Podman is running.${OFF} Integration tests need one (Testcontainers)." >&2
+    echo "Start one, or run ${GREY}bin/ci --quick${OFF} to skip them — which is not enough to sign off." >&2
     exit 2
   fi
 fi

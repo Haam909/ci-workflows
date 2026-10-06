@@ -57,6 +57,10 @@ catch a real defect — deferring them to a server after the merge defeats the
 point of gating. Testcontainers drives the local Docker daemon, so `bin/ci`
 refuses to run rather than silently skipping them when Docker is down.
 
+Podman works too. On Windows, the Podman machine serves the Docker API on
+`\\.\pipe\docker_engine`, which is where Testcontainers looks by default, so
+nothing needs configuring. Elsewhere, point `DOCKER_HOST` at Podman's socket.
+
 Vulnerability scanning is deliberately not on the gate. A CVE published
 overnight has nothing to do with the code you are pushing, and blocking an
 unrelated push on it is how people learn to ignore CI.
@@ -93,7 +97,7 @@ in your setup script. Hooks are never installed by cloning — that would be a
 remote code execution hole, and git won't do it.
 
 Requirements: `bash`, `yq`, `gh` (authenticated with `gh auth login`), Docker
-running if the manifest mentions integration tests (see README.md), plus
+or Podman running if the manifest mentions integration tests (see README.md), plus
 whatever toolchains the repo's components use. On Windows the hook runs under
 Git Bash, which ships with Git for Windows, and `yq` installs with
 `winget install --id MikeFarah.yq -e --source winget` — open a new terminal

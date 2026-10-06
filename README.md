@@ -274,7 +274,7 @@ test project path. For node and python the default command (`npm run
 test:integration`, `pytest -m integration`) ignores the value, so the key acts
 purely as a flag — set `integration-tests: true`.
 
-`bin/ci` refuses to run without Docker if the word `integration` appears
+`bin/ci` refuses to run without Docker or Podman if the word `integration` appears
 **anywhere** in `components.yml` — including comments and a
 `pytest -m "not integration"` override — not only when a component declares
 integration tests.
