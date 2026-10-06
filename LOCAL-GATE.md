@@ -18,17 +18,21 @@ unnecessary for most suites.
   git push
    └─ pre-push hook
        ├─ is my root current with main?  ──── fetch origin/main
-       ├─ bin/ci  (unit tests)
+       ├─ bin/ci  (lint, typecheck, unit, integration)
        └─ push proceeds ──────────────────────► objects land
            └─ bin/signoff --wait ─────────────► status local/ci = success
                                                   pinned to that SHA
-  open a PR
+  open (or update) a PR ─────────────────────► pull_request run
                                                gate job
                                                 ├─ is main still an ancestor?
                                                 └─ is local/ci green on this SHA?
-                                               verify jobs (needs: gate)
-                                                └─ per-component matrix
+                                               branch-name job
+                                                └─ does the branch have a known prefix?
 ```
+
+The PR checks run on `pull_request` only, not on every branch push — a push
+trigger as well would report each check twice per commit, with a skipped
+`branch-name` that counts as passed.
 
 The staleness check happens twice on purpose. Locally it's advice and can be
 skipped. In CI it's enforcement, because main can move between your push and
@@ -71,14 +75,29 @@ chmod +x bin/ci bin/signoff .githooks/pre-push
 git config core.hooksPath .githooks
 ```
 
+On Windows `chmod` doesn't reach git, so record the executable bit directly:
+
+```bash
+git update-index --chmod=+x bin/ci bin/signoff .githooks/pre-push
+```
+
+and keep the scripts' LF line endings — with `core.autocrlf=true` a CRLF
+checkout breaks them under Git Bash. A `.gitattributes` line does it:
+
+```
+* text=auto eol=lf
+```
+
 `core.hooksPath` is per-clone, so each developer runs that line once. Put it
 in your setup script. Hooks are never installed by cloning — that would be a
 remote code execution hole, and git won't do it.
 
 Requirements: `bash`, `yq`, `gh` (authenticated with `gh auth login`), Docker
-running if any component has integration tests, plus whatever toolchains the
-repo's components use. On Windows the hook runs under
-Git Bash, which ships with Git for Windows.
+running if the manifest mentions integration tests (see README.md), plus
+whatever toolchains the repo's components use. On Windows the hook runs under
+Git Bash, which ships with Git for Windows, and `yq` installs with
+`winget install --id MikeFarah.yq -e --source winget` — open a new terminal
+afterwards so it's on `PATH`.
 
 ## Using it
 
@@ -115,10 +134,15 @@ bin/signoff              # HEAD
 bin/signoff <sha>        # a specific commit
 ```
 
+The gate doesn't re-check by itself when the status arrives. If it already
+failed with "No green 'local/ci' status", re-run it after signing off:
+**Re-run failed jobs** on the run, or `gh run rerun <run-id> --failed`.
+
 ## Branch protection
 
 Add `local/ci` as a required status check on main, alongside `ci / gate` and
-the per-component checks. With it required, **Require branches to be up to
+`ci / branch-name` — those three are the whole list. With them required,
+**Require branches to be up to
 date before merging** becomes available, since that setting is a sub-option
 of required status checks rather than something you can turn on alone.
 
@@ -136,7 +160,8 @@ model needs more than that, don't use this.
 **Green locally isn't green everywhere.** A developer on a different SDK
 patch, a different Python version, or with stale dependencies can sign off on
 a run that would fail on a clean machine. `bin/ci --install` before signing
-off reduces it; keeping the matrix running in CI removes it.
+off reduces it; running `bin/ci` in CI as well would remove it, at the cost
+of runner time. That isn't set up.
 
 **Status is per-SHA.** Amend a commit, rebase, or push one more fix and the
 signoff is gone, because it was attached to the old SHA. That's the correct
@@ -148,5 +173,6 @@ you move the `v1` tag.
 
 **Pre-push can't post the status.** The API rejects a status for a commit
 GitHub hasn't seen, and git has no post-push hook, so the hook spawns a short
-retry in the background. It usually lands within a couple of seconds. When it
-doesn't, `bin/signoff <sha>` is the fallback.
+retry in the background. It usually lands within a couple of seconds (it
+does under Git Bash on Windows too). When it doesn't, `bin/signoff <sha>` is
+the fallback.

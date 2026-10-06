@@ -29,7 +29,7 @@ calls. That's what this project is. Instead of 30 copies of the same 300
 lines, each repo has an 8-line file that says "run the shared one".
 
 **Composite action** — several steps bundled together so they can be called
-as one. The five folders under `actions/` are these.
+as one. The four folders under `actions/` are these.
 
 **Runner** — the throwaway VM. `ubuntu-latest` is GitHub's, free for public
 repos, with a monthly allowance for private ones.
@@ -89,17 +89,18 @@ git push -u origin main
 
 ## Step 2 — Put your own name in it
 
-The files ship with a placeholder org called `org`. Replace it:
+The files reference `Haam909/ci-workflows`, the account this copy was set up
+under. If you're setting it up anywhere else, replace it:
 
 ```bash
-grep -rl 'Haam909/ci-workflows' . | xargs sed -i 's#Haam909/ci-workflows#YOURNAME/ci-workflows#g'
+grep -rl 'Haam909/ci-workflows' --exclude-dir=.git . | xargs sed -i 's#Haam909/ci-workflows#YOURNAME/ci-workflows#g'
 git commit -am "ci: point at this account"
 git push
 ```
 
 On macOS use `sed -i ''` instead of `sed -i`.
 
-Check it worked — this should print your name, not `org`:
+Check it worked — this should print your name:
 
 ```bash
 grep -rn 'uses: .*/ci-workflows' .github/workflows | head -3
@@ -136,11 +137,17 @@ project to your repo root. You should end up with:
 .github/workflows/trigger-release.yml
 ```
 
-Edit all four to replace `Haam909/ci-workflows` with `YOURNAME/ci-workflows`.
+If you renamed the account in step 2, the copies already have your name;
+otherwise edit all four to replace `Haam909/ci-workflows` with
+`YOURNAME/ci-workflows`.
+
+Leave the `permissions:` block in each trigger file alone. New repos give
+workflows a read-only token by default, and a shared workflow can't ask for
+more than its caller grants, so without it the run fails before any job starts.
 
 **To start with, delete `trigger-merge-to-main.yml` and
 `trigger-release.yml`.** Get pull request checks working first. Add them back
-in step 7.
+in step 7 (copy them from `examples/` again).
 
 ## Step 5 — Describe your repo in `components.yml`
 
@@ -169,12 +176,20 @@ components:
 - `path` — for node and python, the folder containing `package.json` or
   `requirements.txt`. Leave it out if that's the repo root.
 
-Each component becomes its own parallel job.
+Each component becomes its own parallel job when building and deploying.
+Pull request checks don't depend on it.
 
 ## Step 6 — Things your repo needs before checks will pass
 
-The gate runs lint, typecheck, tests and a vulnerability scan. Some of that
-needs files you may not have yet.
+The checks — lint, typecheck, unit and integration tests — run **on your
+machine** through `bin/ci`, before each push. CI doesn't re-run them; the PR
+gate checks two things: the branch is current with `main`, and the commit has a
+green `local/ci` signoff from your machine.
+
+**Install the local gate first** — the PR gate fails without it. Follow
+"Installing it in a repo" in LOCAL-GATE.md (copy three scripts, mark them
+executable, `git config core.hooksPath .githooks`). Then run `bin/ci` once by
+hand; it needs some files you may not have yet.
 
 **C#** needs a lock file, which NuGet doesn't create unless you ask. Add to
 each `.csproj`:
@@ -195,8 +210,8 @@ git add '**/packages.lock.json' && git commit -m "ci: lock files"
 Without this, every run fails at restore.
 
 **Node** needs `package-lock.json` committed — you almost certainly have it.
-If `lint` or `test` scripts are missing from `package.json`, those steps are
-skipped with a warning rather than failing, so you can add them later.
+A missing `lint` script is fine (the step reports as passed). A missing `test`
+script fails `bin/ci`, so add one — `"test": "node --test"` is enough to start.
 
 **Python** needs a hash-pinned lock file. If you only have
 `requirements.txt`, it'll work but print a warning:
@@ -215,9 +230,14 @@ git commit --allow-empty -m "fix: testing ci"
 git push -u origin fix/try-ci
 ```
 
-Open the PR on GitHub and click the **Actions** tab. You should see a job per
-component plus a `branch-name` job. If something's red, jump to
-Troubleshooting at the bottom — that's expected on a first run.
+The push runs the hook: it checks you're current with `main`, runs `bin/ci`,
+and posts the signoff once the push lands. Nothing runs on GitHub yet — the
+checks start when the pull request exists.
+
+Open the PR on GitHub. You should see two checks, `ci / gate` and
+`ci / branch-name`, plus the `local/ci` status from your machine. If
+something's red, jump to Troubleshooting at the bottom — that's expected on a
+first run.
 
 The branch had to start with `fix/` — see step 8 for why.
 
@@ -246,7 +266,26 @@ repos under GitHub Free. On a private personal repo the environment still
 exists but won't pause for approval. If you're just testing, that's fine —
 it'll run straight through.
 
-Now restore the two trigger files you deleted in step 4.
+Now restore the two trigger files you deleted in step 4 — but set the starting
+version **first**, in the same go. The version comes from tags; with no `v*`
+tag at all, every merge builds `0.1.0-alpha.0` and the first release is
+`0.1.0` regardless of what you merged. And the commit that adds
+`trigger-merge-to-main.yml` would itself run a deploy to test. So: commit the
+restored triggers with `[skip ci]`, and tag that commit as the starting point —
+the only tag you'll ever create yourself:
+
+```bash
+cp <ci-workflows>/examples/.github/workflows/trigger-merge-to-main.yml \
+   <ci-workflows>/examples/.github/workflows/trigger-release.yml .github/workflows/
+git add .github/workflows
+git commit -m "ci: restore merge and release triggers [skip ci]"
+git push
+git tag -a v0.1.0 -m "starting point"
+git push origin v0.1.0
+```
+
+Do this before step 8 — once `main` is protected, it can only change through a
+pull request.
 
 ## Step 8 — Rulesets
 
@@ -260,7 +299,7 @@ number goes up. A branch called `my-changes` tells the system nothing.
 
 - New **branch** ruleset, name it "branch naming"
 - Enforcement status: **Active**
-- Target branches → **Include by pattern** → `**/*`
+- Target branches → **Include all branches**
 - Then **Exclude by pattern**, once each, for: `main`, `feature/**`,
   `feat/**`, `fix/**`, `hotfix/**`, `bugfix/**`, `breaking/**`, `chore/**`,
   `docs/**`, `refactor/**`, `test/**`, `ci/**`, `build/**`, `perf/**`,
@@ -277,10 +316,11 @@ Belt and braces — the ruleset stops the push, the job stops the merge.
 
 - New branch ruleset, "main"
 - Target branches → **Include default branch**
-- Tick **Require a pull request before merging**
-- Tick **Require status checks to pass**, then search for and add each check.
-  They're named `ci / <component name>` — `ci / api`, `ci / web` — plus
-  `ci / branch-name`.
+- Tick **Require a pull request before merging**. Working alone, set required
+  approvals to **0** — GitHub won't let you approve your own pull request.
+- Tick **Require status checks to pass**, then search for and add each check:
+  `ci / gate`, `ci / branch-name` and `local/ci`. (There are no
+  per-component checks.)
 - Tick **Require branches to be up to date before merging**
 
 Checks only appear in that search box *after* they've run at least once, so
@@ -295,34 +335,33 @@ Tags are the version history. Only the release workflow should create them.
 - Tick **Restrict creations**
 
 The release workflow pushes tags using `GITHUB_TOKEN`, and rulesets apply to
-that too. If the release fails with a 403 on `git push origin v1.4.0`, add
-GitHub Actions to the ruleset's **Bypass list**. If you can't find it there,
-set this ruleset to **Evaluate** while testing and switch it to Active once
-everything works.
+that too, so add **GitHub Actions** to the ruleset's **Bypass list** — without
+it every release fails at `git push origin vX.Y.Z`.
+
+**On a personal account, skip 8c.** GitHub refuses the Actions bypass there
+("Actor GitHub Actions integration must be part of the ruleset source or owner
+organization"), and the Evaluate fallback needs Enterprise ("Enforcement
+evaluate option is not supported on this plan"). The rule needs repos owned by
+an organization.
 
 ## Step 9 — Your first release
 
-The version comes from tags, and derivation needs a starting point. With no
-`v*` tag at all, the first release is just `0.1.0` regardless of what you
-merged. Set the starting point by hand — the only tag you'll ever create
-yourself:
-
-```bash
-git tag -a v0.1.0 -m "starting point"
-git push origin v0.1.0
-```
-
-Then:
+You tagged the starting point in step 7. Then:
 
 1. Merge a `fix/…` or `feature/…` branch into main. `trigger-merge-to-main`
    runs and records a deployment to the `test` environment.
 2. Go to **Actions → Release → Run workflow**. Leave the major checkbox
    unticked. Leave **sha** blank to ship what's in test, or paste the commit
-   you've signed off on. Click the green button.
+   you've signed off on (any commit on `main` after the last release). Click
+   the green button.
 3. It works out which commit to ship and what version it should be, then
    stops at the `release` gate. Open the run and click **Review deployments
    → Approve**.
-4. It tags, builds, signs, and publishes a GitHub Release.
+4. It builds and signs, creates the tag and a **draft** GitHub Release,
+   promotes, and only then publishes the release.
+
+If promotion fails, the release stays a draft. Fix the cause and click
+**Re-run failed jobs** on the run — see "What a release does" in README.md.
 
 You never supply a version number, and the commit is optional. If you merged one `feature/` and
 two `fix/` branches, it resolves to `0.2.0` — the biggest bump wins.
@@ -339,6 +378,14 @@ default using `GITHUB_TOKEN`. Two rules:
 
 Python can't use GitHub Packages — there's no Python registry there. Those
 need a `feed:` pointing elsewhere; see the Package feeds section in README.md.
+
+**Check the package's visibility after the first publish.** Published from a
+public repo, the package came out **public**, and that can't be reversed.
+If it must stay private, publish from a private repo or to a private feed.
+
+The repo needs **Write** on the package: package page → **Package settings**
+(`https://github.com/users/YOURNAME/packages/npm/PACKAGE/settings` for an npm
+package on a personal account) → **Manage Actions access**.
 
 ---
 
@@ -363,14 +410,33 @@ wrong folder.
 The C# lock file is missing or stale. `dotnet restore --use-lock-file`, then
 commit the result.
 
+**The run fails instantly with "This run likely failed because of a workflow file issue"**
+That's all `gh run view` says. Open the run page in the browser for the real
+error. The common one is "The workflow is requesting 'pull-requests: read,
+statuses: read', but is only allowed 'pull-requests: none, statuses: none'":
+the trigger file is missing its `permissions:` block. Copy it again from
+`examples/`.
+
 **"Resource not accessible by integration"**
-The token wasn't allowed to do something. Check **Settings → Actions →
-General → Workflow permissions**, and make sure your trigger file has
+The token wasn't allowed to do something. Check the trigger file's
+`permissions:` block matches the one in `examples/`, and that it has
 `secrets: inherit`.
 
 **"No successful deployment to test found"**
-You ran Release before ever merging to main. The release only ships what's
-already in test, so merge something first.
+You ran Release with **sha** blank before ever merging to main. Merge
+something first, or pass the commit you want in **sha**.
+
+**"… is already included in vX.Y.Z. Choose a commit after it."**
+The commit you passed in **sha** was already released. Versions only move
+forward.
+
+**`403 … permission_denied: write_package` when publishing**
+The repo has only Read on the package. Package settings → **Manage Actions
+access** → set the repo to **Write**, then **Re-run failed jobs**.
+
+**My pull request shows no checks after a push**
+If the PR has merge conflicts, GitHub doesn't start `pull_request` runs at
+all. Rebase onto `main` and push again.
 
 **The branch-name job failed**
 Your branch doesn't start with an allowed prefix. Rename it:

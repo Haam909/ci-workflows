@@ -55,29 +55,34 @@ than spread across three workflows.
 
 ## Default commands and overrides
 
+Checks run on the developer's machine through `bin/ci` (see LOCAL-GATE.md);
+CI doesn't re-run them. `install` is also what CI uses before building.
 `node` covers TypeScript and plain JavaScript. Each runtime has defaults;
-the manifest's `commands.<step>` overrides any of them.
+the manifest's `commands.<step>` overrides any of them, in `bin/ci` and CI
+alike.
 
 | | `dotnet` | `node` | `python` |
 |---|---|---|---|
 | install | `dotnet restore --locked-mode` on every declared project | `npm ci` | lock file → `requirements.txt` → `pyproject.toml` |
-| lint | `dotnet format --verify-no-changes` | `npm run lint` | `ruff check` + `ruff format --check` |
+| lint | `dotnet format --verify-no-changes` | `npm run lint --if-present` | `ruff check` + `ruff format --check` |
 | typecheck | `dotnet build -warnaserror` | `tsc --noEmit` | `mypy .` |
 | test | `dotnet test <test-project>` | `npm test` with `CI=true` | `pytest -m "not integration"` |
 | integration | `dotnet test --filter Category=Integration` | `npm run test:integration` | `pytest -m integration` |
-| audit | `dotnet list package --vulnerable` | `npm audit --audit-level=high` | `pip-audit` on the pinned requirements |
 
-Steps that don't apply are skipped with a visible annotation rather than
-failing:
+There is no audit step; vulnerable dependencies are left to Dependabot alerts
+(LOCAL-GATE.md explains why).
 
-- **node** — no `tsconfig.json` means plain JavaScript, so typecheck is
-  skipped. No `lint` or `test` script in `package.json` skips that step with a
-  warning. `CI=true` makes Jest and Vitest run once instead of watching.
-- **python** — `ruff`, `pytest` and `mypy` are installed if the repo doesn't
-  provide them. Typecheck only runs when mypy is configured (`mypy.ini`,
-  `[tool.mypy]`, or `[mypy]` in `setup.cfg`), since mypy on an untyped
-  codebase fails on day one. pytest collecting no unit tests is a warning.
-- **dotnet** — no `test-project` declared skips unit tests with a warning.
+Steps that don't apply:
+
+- **node** — no `tsconfig.json` means plain JavaScript, so typecheck prints
+  "no tsconfig; skipped". No `lint` script means `--if-present` does nothing
+  and the step reports as **passed**, not skipped. `CI=true` makes Jest and
+  Vitest run once instead of watching.
+- **python** — `ruff`, `pytest` and `mypy` must be installed by the repo
+  (e.g. `requirements-dev.txt`); `bin/ci` doesn't install them. mypy runs
+  whenever it's installed and prints "mypy not installed; skipped" otherwise.
+- **dotnet** — no `test-project` declared skips that component's unit **and**
+  integration tests, with a message.
 
 ```yaml
 commands:
@@ -123,8 +128,10 @@ to begin somewhere else — that's the only manual tag in the system.
    left blank, it's the last **successful** `test` deployment (warned if over
    14 days old). Either way the commit must be an ancestor of `main` and newer
    than the latest release. Sign-off happens outside CI, so nothing else is
-   required of a chosen commit.
-2. Derives the version.
+   required of a chosen commit. `components.yml` is read **from that commit**,
+   not from `main`, so an older commit is built with its own manifest.
+2. Derives the version from the branches merged up to that commit; anything
+   merged after it doesn't count.
 3. Waits at the `release` environment gate. This is the ship decision, and the
    only judgment left in the pipeline.
 4. Rebuilds every component from that commit stamped with the version,
@@ -135,17 +142,34 @@ to begin somewhere else — that's the only manual tag in the system.
 6. Promotes. App Services and Functions deploy to the staging slot, smoke
    test, swap, verify, and swap back automatically if production fails its
    health check. Containers get a new revision. Packages publish the stable
-   version.
-7. Publishes the draft release, only once every component promoted. A failed
-   promote leaves the tag and a draft; re-run the failed jobs to finish.
+   version. Each component's `production` deployment is recorded against the
+   **released** commit (`<component> v<version>`, then `success` or
+   `failure`). GitHub's automatic record would use the commit the run was
+   dispatched from — `main`'s head — so it's turned off (`deployment: false`;
+   environment protection rules still apply).
+7. Publishes the draft release, only once every component promoted.
+
+**When promote fails** — a rejected environment rule, a feed refusing the
+publish, a failed health check — the tag exists, the release stays a
+**draft**, and nothing has been announced. Fix the cause, then **Re-run failed
+jobs** (`gh run rerun <run-id> --failed`): that re-runs promote and the
+publish step that depended on it. The failed attempt keeps its `failure`
+deployment record; the re-run adds a new one.
 
 ## Onboarding a repo
 
-1. Copy `examples/.github/` into the repo root.
+1. Copy `examples/.github/` into the repo root. Keep the `permissions:` block
+   in each trigger: a repo whose default token is read-only (the default for
+   new repos) otherwise fails at startup with "The workflow is requesting …
+   but is only allowed …", because a called workflow can't raise permissions.
 2. Edit `.github/components.yml` to describe the components.
-3. Environments `test`, `release` (required reviewers), `production`.
-4. Lock files (below).
-5. Only if a component deploys to Azure or publishes to Azure Artifacts:
+3. Install the local gate (LOCAL-GATE.md). The PR gate fails without a
+   `local/ci` signoff.
+4. Environments `test`, `release` (required reviewers), `production`.
+5. Tag the starting version (`v0.1.0`) **before** the merge trigger reaches
+   `main`; until a tag exists every merge builds `0.1.0-alpha.0`.
+6. Lock files (below).
+7. Only if a component deploys to Azure or publishes to Azure Artifacts:
    repo variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
    `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, plus `ACR_NAME` for
    `container`; and federated credentials for
@@ -218,6 +242,17 @@ GitHub Packages has no Python registry, so a Python package must always name
 its feed. npm packages on GitHub Packages must be scoped to the org
 (`"name": "@contoso/sdk"`).
 
+**Visibility on GitHub Packages.** A package published by this workflow from a
+**public** repo came out **public** in testing, even though GitHub documents
+new personal-account packages as private by default. Making a package public
+can't be undone. Check the package's visibility after its first publish, and
+publish from a private repo (or a private feed) if the package must not be
+public.
+
+The repo needs **Write** on the package under the package's **Manage Actions
+access** settings; with Read, the publish fails with
+`403 … permission_denied: write_package`.
+
 ## Integration tests
 
 Testcontainers, not service containers. `services:` must be declared in
@@ -226,30 +261,45 @@ which would force repo-specific workflow files. Testcontainers puts the
 database in test code, so the same tests run on a dev machine, and this repo
 needs no per-repo config.
 
-A component with no `integration-tests` key simply isn't in the integration
-job's matrix. For dotnet the key's value is the test project path. For node
-and python the default command (`npm run test:integration`, `pytest -m
-integration`) ignores the value, so the key acts purely as a flag — set
-`integration-tests: true`.
+They run in `bin/ci`, on the developer's machine; CI has no integration job.
+A component with no `integration-tests` key (and no
+`commands.integration-test`) skips them. For dotnet the key's value is the
+test project path. For node and python the default command (`npm run
+test:integration`, `pytest -m integration`) ignores the value, so the key acts
+purely as a flag — set `integration-tests: true`.
+
+`bin/ci` refuses to run without Docker if the word `integration` appears
+**anywhere** in `components.yml` — including comments and a
+`pytest -m "not integration"` override — not only when a component declares
+integration tests.
 
 ## Rulesets
 
 Set these at org level so they cover every repo. On a personal account the
 same settings exist per repo instead.
 
-**Branch naming.** Target `**/*`, exclude `main` and each allowed prefix
-(`feature/**`, `fix/**`, `breaking/**`, `chore/**`, `docs/**`, `refactor/**`,
-`test/**`, `ci/**`, `build/**`, `perf/**`, `deps/**`, `dependabot/**`). Enable
-**Restrict creations**. `reusable-verify-pull-request.yml` has a branch-name job as a backstop.
+**Branch naming.** Target all branches, exclude `main` and each allowed prefix
+(`feature/**`, `feat/**`, `fix/**`, `hotfix/**`, `bugfix/**`, `breaking/**`,
+`chore/**`, `docs/**`, `refactor/**`, `test/**`, `ci/**`, `build/**`,
+`perf/**`, `deps/**`, `dependabot/**`). Enable **Restrict creations**.
+`reusable-verify-pull-request.yml` has a branch-name job as a backstop.
 
 Keep that list in sync with the `case` block in `actions/derive-version/action.yml` — a
 prefix the ruleset allows but the action doesn't know falls through to patch
 with a warning.
 
-**On `main`.** Require a PR, require status checks, require up to date.
+**On `main`.** Require a PR, require status checks, require up to date. The
+required checks are `ci / gate`, `ci / branch-name` and `local/ci` — there are
+no per-component PR checks. The PR checks run on `pull_request` only: a push
+trigger as well would report each check twice per commit, and its skipped
+`branch-name` job counts as passed for a required check.
 
 **On tags.** Target `v*`, **Restrict creations**, bypass only for the Actions
-app. Stops anyone tagging a release from a laptop.
+app. Stops anyone tagging a release from a laptop. On a free **personal**
+account the Actions bypass is refused ("must be part of the ruleset source or
+owner organization") and so is Evaluate mode ("upgrade to Enterprise"), so
+this rule needs org-owned repos; that setup is untested. Without the bypass,
+an active rule blocks the release's own tag push.
 
 ## Versioning this repo
 
@@ -257,8 +307,9 @@ Consumers pin `@v1`. Move `v1` forward for compatible changes; cut `v2` for
 anything needing manifest changes — thirty repos means a breaking change here
 is thirty PRs, so prefer additive keys with defaults.
 
-Note the `Haam909/ci-workflows/...@v1` references inside the workflows and the
-README need your real org name substituted.
+The `Haam909/ci-workflows/...@v1` references inside the workflows and the
+examples point at the account this copy was set up under. Substitute your org
+name when moving it (SETUP-GITHUB.md step 2).
 
 ## Known limits
 
@@ -288,5 +339,9 @@ README need your real org name substituted.
   Static Web Apps or a container, not an App Service zip.
 - npm only. `setup-node`'s cache needs `package-lock.json`; yarn and pnpm
   repos need `commands.install` and a lock file npm can read.
-- `pip-audit` has no severity threshold, so Python fails on any known
-  vulnerability while node and dotnet fail on High/Critical only.
+- The `release` environment's automatic deployment record (the approval) is
+  stamped with the dispatch commit, not the released one. Only `production`
+  records are written explicitly.
+- Version derivation reads PR branch names via `commits/{sha}/pulls`. It
+  worked on a public repo without `pull-requests: read`; private repos are
+  untested. A failure there is silent: every commit falls back to patch.

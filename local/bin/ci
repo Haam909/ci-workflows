@@ -131,8 +131,7 @@ for (( i=0; i<COUNT; i++ )); do
     step "${NAME}: typecheck" "(cd \"${DIR}\" && ${cmd})"
   fi
 
-  # Unit tests only — integration tests stay in CI, where Testcontainers has
-  # a predictable Docker daemon.
+  # Unit tests. Integration tests follow below.
   cmd="${C_TEST}"
   if [[ -z "$cmd" ]]; then
     case "${RUNTIME}" in
