@@ -200,15 +200,18 @@ runs:
           node)
             TAG=latest
             [[ "${STAGE}" == "test" ]] && TAG=alpha
+            # npm looks up credentials by the registry URL with a trailing
+            # slash, so "//npm.pkg.github.com:_authToken" is never matched.
+            REGISTRY="${FEED%/}/"
             # Written outside the repo so no token lands in the work tree.
             NPMRC="${RUNNER_TEMP}/publish.npmrc"
             {
-              printf 'registry=%s\n' "${FEED}"
-              printf '%s:_authToken=%s\n' "${FEED#https:}" "${TOKEN}"
+              printf 'registry=%s\n' "${REGISTRY}"
+              printf '%s:_authToken=%s\n' "${REGISTRY#https:}" "${TOKEN}"
               printf 'always-auth=true\n'
             } > "${NPMRC}"
             npm_config_userconfig="${NPMRC}" \
-              npm publish "${ARTIFACT}" --tag "${TAG}" --registry "${FEED}"
+              npm publish "${ARTIFACT}" --tag "${TAG}" --registry "${REGISTRY}"
             rm -f "${NPMRC}"
             ;;
           python)
