@@ -60,9 +60,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - id: read
-        run: echo "components=$(yq -o=json -I=0 '.components' '${{ inputs.manifest }}')" >> "$GITHUB_OUTPUT"
-
       - name: Find the commit to release
         id: target
         env:
@@ -110,6 +107,20 @@ jobs:
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "source=${SOURCE}" >> "$GITHUB_OUTPUT"
           echo "Releasing ${SHA} (${SOURCE})"
+
+      # The checkout above is the dispatch ref (main's head). A chosen older
+      # commit must be built from its own manifest, so read it from that commit.
+      - id: read
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+          MANIFEST: ${{ inputs.manifest }}
+        run: |
+          set -euo pipefail
+          git show "${SHA}:${MANIFEST}" > "${RUNNER_TEMP}/components.yml" \
+            || { echo "::error::${MANIFEST} does not exist at ${SHA:0:7}."; exit 1; }
+          COMPONENTS="$(yq -o=json -I=0 '.components' "${RUNNER_TEMP}/components.yml")"
+          echo "components=${COMPONENTS}" >> "$GITHUB_OUTPUT"
+          echo "Manifest at ${SHA:0:7}: ${COMPONENTS}"
 
       - id: version
         uses: Haam909/ci-workflows/actions/derive-version@v1
