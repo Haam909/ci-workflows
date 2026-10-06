@@ -322,6 +322,10 @@ Belt and braces — the ruleset stops the push, the job stops the merge.
   `ci / gate`, `ci / branch-name` and `local/ci`. (There are no
   per-component checks.)
 - Tick **Require branches to be up to date before merging**
+- Tick **Require linear history**. Pull requests then merge by squash or
+  rebase only; a merge commit is refused ("Merge commits are not allowed on
+  this repository"). It keeps a branch that forked before a release from
+  landing after it.
 
 Checks only appear in that search box *after* they've run at least once, so
 do this after your first pull request, not before.
@@ -429,6 +433,11 @@ something first, or pass the commit you want in **sha**.
 **"… is already included in vX.Y.Z. Choose a commit after it."**
 The commit you passed in **sha** was already released. Versions only move
 forward.
+
+**"… does not contain vX.Y.Z: it branched off before that release."**
+The commit sits on a branch that forked before the latest release. Releasing
+it would ship without that release's changes. Choose a commit on `main` after
+the release.
 
 **`403 … permission_denied: write_package` when publishing**
 The repo has only Read on the package. Package settings → **Manage Actions

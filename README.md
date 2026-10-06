@@ -126,8 +126,9 @@ to begin somewhere else — that's the only manual tag in the system.
 
 1. `resolve` picks the commit. With the `sha` input set, it's that commit;
    left blank, it's the last **successful** `test` deployment (warned if over
-   14 days old). Either way the commit must be an ancestor of `main` and newer
-   than the latest release. Sign-off happens outside CI, so nothing else is
+   14 days old). Either way the commit must be an ancestor of `main` and must
+   **contain** the latest release — not at or behind it, and not on a branch
+   that forked before it. Sign-off happens outside CI, so nothing else is
    required of a chosen commit. `components.yml` is read **from that commit**,
    not from `main`, so an older commit is built with its own manifest.
 2. Derives the version from the branches merged up to that commit; anything
@@ -288,7 +289,9 @@ Keep that list in sync with the `case` block in `actions/derive-version/action.y
 prefix the ruleset allows but the action doesn't know falls through to patch
 with a warning.
 
-**On `main`.** Require a PR, require status checks, require up to date. The
+**On `main`.** Require a PR, require status checks, require up to date,
+require linear history (squash or rebase merges only — with merge commits, a
+branch that forked before a release can land after it). The
 required checks are `ci / gate`, `ci / branch-name` and `local/ci` — there are
 no per-component PR checks. The PR checks run on `pull_request` only: a push
 trigger as well would report each check twice per commit, and its skipped
