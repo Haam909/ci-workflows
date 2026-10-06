@@ -7,6 +7,10 @@ on:
         description: 'Force a major version bump (breaking change)'
         type: boolean
         default: false
+      sha:
+        description: 'Commit to release (blank = the commit currently live in test)'
+        type: string
+        default: ''
 concurrency:
   group: release
   cancel-in-progress: false
@@ -24,4 +28,5 @@ jobs:
     uses: Haam909/ci-workflows/.github/workflows/reusable-release-to-production.yml@v1
     with:
       major: ${{ inputs.major }}
+      sha: ${{ inputs.sha }}
     secrets: inherit

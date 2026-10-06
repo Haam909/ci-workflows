@@ -1,8 +1,9 @@
 # Haam909/ci-workflows/.github/workflows/reusable-release-to-production.yml
 #
-# Reusable, manual. The only human decisions are approving the `release`
-# environment and, rarely, ticking the major box. No commit or version input
-# exists.
+# Reusable, manual. The human decisions are which commit to ship (optional
+# `sha` input; blank means the commit currently live in test), approving the
+# `release` environment and, rarely, ticking the major box. There is no version
+# input: the version is always derived.
 #
 # Ordering note: the GitHub Release is created as a draft with every asset
 # attached, and the tag is pushed only after those uploads succeed. A failed
@@ -19,6 +20,12 @@ on:
       major:
         type: boolean
         default: false
+      sha:
+        description: >-
+          Commit to release. Any ancestor of main newer than the last release.
+          Blank releases the commit currently live in test.
+        type: string
+        default: ''
       node-version:
         type: string
         default: '22'
@@ -53,31 +60,53 @@ jobs:
       - id: read
         run: echo "components=$(yq -o=json -I=0 '.components' '${{ inputs.manifest }}')" >> "$GITHUB_OUTPUT"
 
-      - name: Find the commit currently live in test
+      - name: Find the commit to release
         id: target
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           SHA=""; CREATED=""
-          for id in $(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=test&per_page=30" --jq '.[].id'); do
-            state="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}/statuses?per_page=1" --jq '.[0].state // empty')"
-            if [[ "${state}" == "success" ]]; then
-              SHA="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}" --jq '.sha')"
-              CREATED="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}" --jq '.created_at')"
-              break
-            fi
-          done
-          [[ -n "${SHA}" ]] || { echo "::error::No successful deployment to test found."; exit 1; }
+
+          if [[ -n "${INPUT_SHA}" ]]; then
+            # Chosen by a person. Sign-off happens outside CI, so the only
+            # requirement is that it is on main.
+            SHA="$(git rev-parse --verify --quiet "${INPUT_SHA}^{commit}")" \
+              || { echo "::error::${INPUT_SHA} is not a commit in this repository."; exit 1; }
+            SOURCE="chosen"
+          else
+            for id in $(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=test&per_page=30" --jq '.[].id'); do
+              state="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}/statuses?per_page=1" --jq '.[0].state // empty')"
+              if [[ "${state}" == "success" ]]; then
+                SHA="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}" --jq '.sha')"
+                CREATED="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}" --jq '.created_at')"
+                break
+              fi
+            done
+            [[ -n "${SHA}" ]] || { echo "::error::No successful deployment to test found. Pass a sha to release a specific commit."; exit 1; }
+            SOURCE="live in test"
+          fi
 
           git merge-base --is-ancestor "${SHA}" origin/main \
-            || { echo "::error::Test deployment ${SHA} is not an ancestor of main."; exit 1; }
+            || { echo "::error::${SHA} is not an ancestor of main."; exit 1; }
 
-          AGE=$(( ( $(date +%s) - $(date -d "${CREATED}" +%s) ) / 86400 ))
-          (( AGE > 14 )) && echo "::warning::The test deployment is ${AGE} days old. Confirm this is what you mean to ship."
+          # Versions only move forward: a commit at or behind the latest
+          # release would derive a version that already exists.
+          LATEST="$(git describe --tags --abbrev=0 --match 'v[0-9]*' origin/main 2>/dev/null || true)"
+          if [[ -n "${LATEST}" ]] && git merge-base --is-ancestor "${SHA}" "${LATEST}"; then
+            echo "::error::${SHA:0:7} is already included in ${LATEST}. Choose a commit after it."
+            exit 1
+          fi
+
+          if [[ -n "${CREATED}" ]]; then
+            AGE=$(( ( $(date +%s) - $(date -d "${CREATED}" +%s) ) / 86400 ))
+            (( AGE > 14 )) && echo "::warning::The test deployment is ${AGE} days old. Confirm this is what you mean to ship."
+          fi
 
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "Releasing ${SHA} (in test for ${AGE} day(s))"
+          echo "source=${SOURCE}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${SHA} (${SOURCE})"
 
       - id: version
         uses: Haam909/ci-workflows/actions/derive-version@v1
@@ -93,7 +122,7 @@ jobs:
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| Commit | \`${{ steps.target.outputs.sha }}\` |"
+            echo "| Commit | \`${{ steps.target.outputs.sha }}\` (${{ steps.target.outputs.source }}) |"
             echo "| Previous | ${{ steps.version.outputs.previous-tag }} |"
             echo "| Bump | ${{ steps.version.outputs.bump }} |"
           } >> "$GITHUB_STEP_SUMMARY"

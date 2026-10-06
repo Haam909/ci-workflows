@@ -119,9 +119,11 @@ to begin somewhere else — that's the only manual tag in the system.
 
 ## What a release does
 
-1. `resolve` queries the deployments API for the last **successful** `test`
-   deployment, confirms that commit is an ancestor of `main`, warns if it's
-   over 14 days old. There is no commit input.
+1. `resolve` picks the commit. With the `sha` input set, it's that commit;
+   left blank, it's the last **successful** `test` deployment (warned if over
+   14 days old). Either way the commit must be an ancestor of `main` and newer
+   than the latest release. Sign-off happens outside CI, so nothing else is
+   required of a chosen commit.
 2. Derives the version.
 3. Waits at the `release` environment gate. This is the ship decision, and the
    only judgment left in the pipeline.

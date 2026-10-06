@@ -317,13 +317,14 @@ Then:
 1. Merge a `fix/…` or `feature/…` branch into main. `trigger-merge-to-main`
    runs and records a deployment to the `test` environment.
 2. Go to **Actions → Release → Run workflow**. Leave the major checkbox
-   unticked. Click the green button.
-3. It works out which commit is in test and what version it should be, then
+   unticked. Leave **sha** blank to ship what's in test, or paste the commit
+   you've signed off on. Click the green button.
+3. It works out which commit to ship and what version it should be, then
    stops at the `release` gate. Open the run and click **Review deployments
    → Approve**.
 4. It tags, builds, signs, and publishes a GitHub Release.
 
-You supply no version number and no commit. If you merged one `feature/` and
+You never supply a version number, and the commit is optional. If you merged one `feature/` and
 two `fix/` branches, it resolves to `0.2.0` — the biggest bump wins.
 
 ## Step 10 — Publishing packages (optional)
