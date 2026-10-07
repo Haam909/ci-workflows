@@ -127,6 +127,10 @@ anything" — your app repo is still running the old tagged version.
 
 ## Step 4 — Set up your app repo
 
+Steps 4 to 8 can be done by a script: `local/bin/onboard` (README.md,
+"Onboarding a repo"). The steps below are what it does, for doing it by hand
+or understanding the result.
+
 In the repo you want to build, copy the `examples/.github/` folder from this
 project to your repo root. You should end up with:
 

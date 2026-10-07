@@ -1,0 +1,372 @@
+#!/usr/bin/env bash
+# onboard — put a repo on ci-workflows. Run it from the repo's clone:
+#
+#   <ci-workflows>/local/bin/onboard init     write the files, then stop so you
+#                                             can check .github/components.yml
+#   <ci-workflows>/local/bin/onboard apply    run bin/ci, commit to main, tag
+#                                             v0.1.0, create the environments
+#                                             and rulesets, then check
+#   <ci-workflows>/local/bin/onboard check    only the check; changes nothing
+#
+# Options:
+#   --reviewer LOGIN      who approves releases (default: you)
+#   --no-deploy-to-test   leave out trigger-merge-to-main.yml, for a repo with
+#                         no test environment to deploy to yet
+#
+# Safe to re-run. Each step looks first and only adds what is missing. It never
+# overwrites a workflow, environment or ruleset that already exists; `check`
+# reports where one differs from what the docs ask for.
+#
+# Needs: bash, git, yq, gh (logged in, admin on the repo). dotnet or npm for
+# the lock files of whatever the repo contains. Azure setup is not covered.
+
+set -uo pipefail
+# Git Bash rewrites arguments like origin/main:bin/ci into Windows paths.
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+
+CIW="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MANIFEST=.github/components.yml
+MARK='# onboard: check this'
+CMD="${1:-}"; [[ $# -gt 0 ]] && shift
+REVIEWER=""; DEPLOY_TO_TEST=true
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reviewer)          REVIEWER="${2:-}"; shift ;;
+    --no-deploy-to-test) DEPLOY_TO_TEST=false ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+case "${CMD}" in
+  init|apply|check) ;;
+  -h|--help|"") sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) echo "unknown command: ${CMD} (init, apply or check)" >&2; exit 2 ;;
+esac
+
+BOLD=$'\033[1m'; GREEN=$'\033[1;32m'; RED=$'\033[1;31m'; YELLOW=$'\033[1;33m'; GREY=$'\033[1;90m'; OFF=$'\033[0m'
+say()  { printf '%s\n' "${GREY}── $*${OFF}"; }
+done_() { printf '%s\n' "  ${GREEN}✓${OFF} $*"; }
+skip() { printf '%s\n' "  ${GREY}· $*${OFF}"; }
+warn() { printf '%s\n' "  ${YELLOW}!${OFF} $*"; }
+die()  { printf '%s\n' "${RED}$*${OFF}" >&2; exit 1; }
+
+for t in git yq; do command -v "$t" > /dev/null || die "$t is required"; done
+ROOT="$(git rev-parse --show-toplevel 2> /dev/null)" || die "run this inside the repo's clone"
+cd "${ROOT}" || exit 1
+[[ "${ROOT}" != "${CIW}" ]] || die "run this in the repo you're onboarding, not in ci-workflows"
+
+GATE_FILES=(bin/ci bin/signoff .githooks/pre-push)
+TRIGGERS=(trigger-pull-request.yml trigger-release.yml)
+[[ "${DEPLOY_TO_TEST}" == true ]] && TRIGGERS+=(trigger-merge-to-main.yml)
+
+# Branch prefixes: keep in step with actions/derive-version and SETUP-GITHUB.md 8a.
+PREFIXES=(feature feat fix hotfix bugfix breaking chore docs refactor test ci build perf deps dependabot)
+CHECKS=("ci / gate" "ci / branch-name" "local/ci")
+GITHUB_ACTIONS_APP=15368   # the GitHub Actions app on github.com
+
+# ---------------------------------------------------------------- init ----
+
+scaffold_manifest() {
+  local out="" found=0 p dir name tfm ver target t
+  # dotnet: every project that isn't a test project is a component.
+  while IFS= read -r p; do
+    grep -q 'Microsoft.NET.Test.Sdk' "$p" && continue
+    found=1
+    name="$(basename "$p" .csproj | tr 'A-Z.' 'a-z-')"
+    tfm="$(grep -o '<TargetFramework>net[0-9]*\.[0-9]*' "$p" | head -1 | sed 's/.*net//')"
+    if grep -q 'Microsoft.Azure.Functions.Worker' "$p"; then target=function
+    elif grep -q 'Microsoft.NET.Sdk.Web' "$p"; then target=app-service
+    else target=package; fi
+    out+="  - name: ${name}   ${MARK}"$'\n'"    runtime: dotnet"$'\n'"    target: ${target}   ${MARK}"$'\n'"    project: ${p}"$'\n'
+    [[ -n "${tfm}" ]] && out+="    dotnet-version: '${tfm}.x'"$'\n'
+    # Test projects that reference this one.
+    while IFS= read -r t; do
+      grep -q 'Microsoft.NET.Test.Sdk' "$t" || continue
+      sed 's#\\#/#g' "$t" | grep -qF "/$(basename "$p")\"" || continue
+      if [[ "$(basename "$t")" =~ [Ii]ntegration ]]; then out+="    integration-tests: ${t}"$'\n'
+      else out+="    test-project: ${t}"$'\n'; fi
+    done < <(git ls-files '*.csproj')
+    [[ "${target}" != package ]] && out+="    app-test: ${name}-test   ${MARK}"$'\n'"    app-prod: ${name}   ${MARK}"$'\n'
+    out+=$'\n'
+  done < <(git ls-files '*.csproj')
+
+  # node and python: one component per folder holding the project file.
+  while IFS= read -r p; do
+    found=1; dir="$(dirname "$p")"; name="$( [[ "${dir}" == . ]] && basename "${ROOT}" || basename "${dir}")"
+    if [[ -f "${dir}/Dockerfile" ]]; then target=container
+    elif grep -q '"private": *true' "$p"; then target=app-service
+    else target=package; fi
+    out+="  - name: ${name}   ${MARK}"$'\n'"    runtime: node"$'\n'"    target: ${target}   ${MARK}"$'\n'
+    [[ "${dir}" != . ]] && out+="    path: ${dir}"$'\n'
+    [[ "${target}" == container ]] && out+="    dockerfile: ${dir}/Dockerfile"$'\n'
+    [[ "${target}" != package ]] && out+="    app-test: ${name}-test   ${MARK}"$'\n'"    app-prod: ${name}   ${MARK}"$'\n'
+    out+=$'\n'
+  done < <(git ls-files 'package.json' '*/package.json')
+
+  while IFS= read -r dir; do
+    found=1; name="$( [[ "${dir}" == . ]] && basename "${ROOT}" || basename "${dir}")"
+    if [[ -f "${dir}/Dockerfile" ]]; then target=container
+    elif [[ -f "${dir}/host.json" ]]; then target=function
+    elif [[ -f "${dir}/requirements.txt" || -f "${dir}/requirements.lock.txt" ]]; then target=app-service
+    else target=package; fi
+    out+="  - name: ${name}   ${MARK}"$'\n'"    runtime: python"$'\n'"    target: ${target}   ${MARK}"$'\n'
+    [[ "${dir}" != . ]] && out+="    path: ${dir}"$'\n'
+    [[ "${target}" == container ]] && out+="    dockerfile: ${dir}/Dockerfile"$'\n'
+    [[ "${target}" != package ]] && out+="    app-test: ${name}-test   ${MARK}"$'\n'"    app-prod: ${name}   ${MARK}"$'\n'
+    out+=$'\n'
+  done < <(git ls-files 'pyproject.toml' '*/pyproject.toml' 'requirements.txt' '*/requirements.txt' \
+             | xargs -r -n1 dirname | sort -u)
+
+  [[ "${found}" == 1 ]] || return 1
+  # No comments in the file beyond the markers: bin/ci greps the whole file.
+  printf 'components:\n%s' "${out}" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > "${MANIFEST}"
+}
+
+init() {
+  say "workflows"
+  mkdir -p .github/workflows
+  for f in "${TRIGGERS[@]}"; do
+    if [[ -f ".github/workflows/$f" ]]; then
+      cmp -s "${CIW}/examples/.github/workflows/$f" ".github/workflows/$f" \
+        && skip "$f already there" || warn "$f exists and differs from examples/; left alone"
+    else
+      cp "${CIW}/examples/.github/workflows/$f" ".github/workflows/$f" && done_ "$f"
+    fi
+  done
+
+  say "components.yml"
+  if [[ -f "${MANIFEST}" ]]; then
+    skip "already there; left alone"
+  elif scaffold_manifest; then
+    done_ "written from the projects found; check every line marked '${MARK}'"
+  else
+    die "no .csproj, package.json, pyproject.toml or requirements.txt tracked by git; write ${MANIFEST} yourself (examples/.github/components.yml)"
+  fi
+
+  say "local gate"
+  mkdir -p bin .githooks
+  for f in "${GATE_FILES[@]}"; do
+    src="${CIW}/local/${f/.githooks/githooks}"
+    if cmp -s "${src}" "$f"; then skip "$f up to date"; else cp "${src}" "$f" && done_ "$f"; fi
+  done
+  # The .NET .gitignore ignores every bin/, this one included.
+  if git check-ignore -q bin/ci; then
+    printf '\n# Local CI gate scripts\n!/bin/\n' >> .gitignore && done_ ".gitignore: !/bin/"
+  fi
+  # A CRLF checkout breaks the scripts under Git Bash.
+  for f in "${GATE_FILES[@]}"; do
+    if [[ "$(git check-attr eol -- "$f" | sed 's/.*: //')" != lf ]]; then
+      printf '%s text eol=lf\n' "$f" >> .gitattributes && done_ ".gitattributes: $f eol=lf"
+    fi
+  done
+  git add "${GATE_FILES[@]}"
+  [[ -f .gitattributes ]] && git add .gitattributes
+  git update-index --chmod=+x "${GATE_FILES[@]}"
+  git config core.hooksPath .githooks
+  done_ "executable bit recorded, core.hooksPath=.githooks"
+
+  say "lock files"
+  local projects; projects="$(git ls-files '*.csproj')"
+  if [[ -n "${projects}" ]]; then
+    command -v dotnet > /dev/null || die "dotnet is needed to write packages.lock.json"
+    if [[ ! -f Directory.Build.props ]]; then
+      printf '<Project>\n  <PropertyGroup>\n    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>\n  </PropertyGroup>\n</Project>\n' > Directory.Build.props
+      done_ "Directory.Build.props with RestorePackagesWithLockFile"
+    elif ! grep -q 'RestorePackagesWithLockFile' Directory.Build.props; then
+      die "Directory.Build.props exists without RestorePackagesWithLockFile; add <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile> to it and re-run"
+    fi
+    while IFS= read -r p; do
+      dotnet restore "$p" --use-lock-file > /dev/null || die "dotnet restore $p failed"
+    done <<< "${projects}"
+    done_ "packages.lock.json for $(wc -l <<< "${projects}" | tr -d ' ') project(s)"
+  fi
+  while IFS= read -r p; do
+    [[ -f "$(dirname "$p")/package-lock.json" ]] || die "$(dirname "$p") has no package-lock.json; run npm install there and commit it"
+  done < <(git ls-files 'package.json' '*/package.json')
+
+  echo
+  echo "${BOLD}Next:${OFF} check ${MANIFEST} (see README \"Two axes\" for the fields), delete each"
+  echo "'${MARK}' marker, then run ${GREY}onboard apply${OFF}."
+}
+
+# --------------------------------------------------------------- apply ----
+
+ensure_environment() {     # name [reviewer-id]
+  local env="$1" rid="${2:-}"
+  if gh api "repos/${REPO}/environments/${env}" > /dev/null 2>&1; then
+    skip "environment ${env} exists; left alone"
+  elif [[ -n "${rid}" ]]; then
+    printf '{"reviewers":[{"type":"User","id":%s}]}' "${rid}" \
+      | gh api -X PUT "repos/${REPO}/environments/${env}" --input - > /dev/null && done_ "environment ${env}, reviewer ${REVIEWER}"
+  else
+    gh api -X PUT "repos/${REPO}/environments/${env}" > /dev/null && done_ "environment ${env}"
+  fi
+}
+
+ensure_ruleset() {         # name json
+  if [[ -n "$(gh api "repos/${REPO}/rulesets" --jq ".[] | select(.name==\"$1\") | .id")" ]]; then
+    skip "ruleset '$1' exists; left alone"
+  else
+    gh api -X POST "repos/${REPO}/rulesets" --input - <<< "$2" > /dev/null && done_ "ruleset '$1'"
+  fi
+}
+
+apply() {
+  local b
+  say "manifest"
+  [[ -f "${MANIFEST}" ]] || die "no ${MANIFEST}; run onboard init first"
+  ! grep -qF "${MARK}" "${MANIFEST}" || die "${MANIFEST} still has '${MARK}' markers"
+  yq -e '.components | length > 0' "${MANIFEST}" > /dev/null || die "${MANIFEST} has no components"
+  b="$(yq '.components[] | select((.runtime | test("^(dotnet|node|python)$") | not)
+          or (.target | test("^(app-service|function|container|package)$") | not)) | .name' "${MANIFEST}")"
+  [[ -z "$b" ]] || die "bad runtime or target on: $b"
+  done_ "components: $(yq '[.components[].name] | join(", ")' "${MANIFEST}")"
+
+  say "branch"
+  [[ "$(git branch --show-current)" == main ]] || die "switch to main first"
+  git fetch --quiet origin main --tags || die "can't fetch origin"
+  [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || die "main isn't at origin/main; pull or push first"
+  done_ "on main at origin/main"
+
+  say "bin/ci"
+  bash bin/ci || die "bin/ci failed. Fix that first: the PR gate needs it green."
+
+  say "commit"
+  local paths=("${MANIFEST}" "${GATE_FILES[@]}")
+  for f in "${TRIGGERS[@]}"; do paths+=(".github/workflows/$f"); done
+  [[ -f .gitattributes ]] && paths+=(.gitattributes)
+  [[ -f .gitignore ]] && paths+=(.gitignore)
+  [[ -f Directory.Build.props ]] && paths+=(Directory.Build.props)
+  while IFS= read -r f; do paths+=("$f"); done < <(git ls-files --others --exclude-standard '*packages.lock.json')
+  git add "${paths[@]}"
+  if git diff --cached --quiet; then
+    skip "nothing new to commit"
+  else
+    # [skip ci]: this commit adds the merge trigger, which would otherwise deploy it.
+    git commit --quiet -m "ci: onboard to ci-workflows [skip ci]" || die "commit failed"
+    git push --quiet origin main \
+      || die "push to main refused. If main is protected, merge this commit through a PR, then re-run apply."
+    done_ "$(git log --oneline -1)"
+  fi
+
+  say "starting tag"
+  if [[ -n "$(git ls-remote --tags origin 'refs/tags/v[0-9]*')" ]]; then
+    skip "a v* tag exists; versions continue from it"
+  else
+    git tag -a v0.1.0 -m "starting point" && git push --quiet origin v0.1.0 && done_ "v0.1.0 at $(git rev-parse --short HEAD)"
+  fi
+
+  say "environments"
+  local rid; rid="$(gh api "users/${REVIEWER}" --jq .id)" || die "no GitHub user ${REVIEWER}"
+  ensure_environment test
+  ensure_environment release "${rid}"
+  ensure_environment production
+
+  say "rulesets"
+  local excl="\"refs/heads/main\"" ctx="" p c
+  for p in "${PREFIXES[@]}"; do excl+=",\"refs/heads/${p}/**\""; done
+  for c in "${CHECKS[@]}"; do
+    [[ "$c" == local/* ]] && ctx+="{\"context\":\"$c\"}," || ctx+="{\"context\":\"$c\",\"integration_id\":${GITHUB_ACTIONS_APP}},"
+  done
+  ensure_ruleset "branch naming" "{\"name\":\"branch naming\",\"target\":\"branch\",\"enforcement\":\"active\",
+    \"conditions\":{\"ref_name\":{\"include\":[\"~ALL\"],\"exclude\":[${excl}]}},\"rules\":[{\"type\":\"creation\"}]}"
+  ensure_ruleset main "{\"name\":\"main\",\"target\":\"branch\",\"enforcement\":\"active\",
+    \"conditions\":{\"ref_name\":{\"include\":[\"~DEFAULT_BRANCH\"],\"exclude\":[]}},
+    \"rules\":[{\"type\":\"non_fast_forward\"},{\"type\":\"required_linear_history\"},
+      {\"type\":\"pull_request\",\"parameters\":{\"required_approving_review_count\":0,\"dismiss_stale_reviews_on_push\":false,
+        \"require_code_owner_review\":false,\"require_last_push_approval\":false,\"required_review_thread_resolution\":false}},
+      {\"type\":\"required_status_checks\",\"parameters\":{\"strict_required_status_checks_policy\":true,
+        \"required_status_checks\":[${ctx%,}]}}]}"
+  echo
+  check
+}
+
+# --------------------------------------------------------------- check ----
+
+FAILS=0
+ok()  { printf '%s\n' "  ${GREEN}✓${OFF} $*"; }
+bad() { printf '%s\n' "  ${RED}✗${OFF} $*"; FAILS=$((FAILS + 1)); }
+is()  { [[ "$2" == "$3" ]] && ok "$1" || bad "$1: got '${2}', want '${3}'"; }
+
+check() {
+  local f mode want got id
+  git fetch --quiet origin main --tags 2> /dev/null
+
+  say "files on origin/main"
+  for f in "${TRIGGERS[@]}"; do
+    git cat-file -e "origin/main:.github/workflows/$f" 2> /dev/null && ok "$f" || bad "$f missing"
+  done
+  git cat-file -e "origin/main:${MANIFEST}" 2> /dev/null && ok "${MANIFEST}" || bad "${MANIFEST} missing"
+  for f in "${GATE_FILES[@]}"; do
+    mode="$(git ls-tree origin/main -- "$f" | cut -d' ' -f1)"
+    is "$f mode" "${mode}" 100755
+    if [[ -n "${mode}" ]] && ! git show "origin/main:$f" | cmp -s - "${CIW}/local/${f/.githooks/githooks}"; then
+      bad "$f differs from ci-workflows' copy; re-run onboard init, commit it"
+    fi
+  done
+  is "core.hooksPath" "$(git config core.hooksPath)" .githooks
+
+  say "starting tag"
+  got="$(git ls-remote --tags origin 'refs/tags/v[0-9]*' | grep -c -v '\^{}')"
+  [[ "${got}" -gt 0 ]] && ok "${got} v* tag(s)" || bad "no v* tag: every merge would build 0.1.0-alpha.0"
+
+  say "environments"
+  for f in test release production; do
+    got="$(gh api "repos/${REPO}/environments/$f" --jq '[.protection_rules[].type] | join(",")' 2> /dev/null)" \
+      || { bad "environment $f missing"; continue; }
+    if [[ "$f" == release ]]; then
+      [[ "${got}" == *required_reviewers* ]] && ok "release has required reviewers" || bad "release has no required reviewers"
+    else
+      ok "environment $f"
+    fi
+  done
+  if [[ "$(gh api "repos/${REPO}" --jq '"\(.private) \(.owner.type)"')" == "true User" ]]; then
+    warn "private repo on a personal account: release won't pause for approval (SETUP-GITHUB.md step 7)"
+  fi
+
+  say "rulesets"
+  id="$(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.name=="branch naming") | .id')"
+  if [[ -z "${id}" ]]; then bad "ruleset 'branch naming' missing"; else
+    want="refs/heads/main"; for f in "${PREFIXES[@]}"; do want+=",refs/heads/$f/**"; done
+    want="$(tr ',' '\n' <<< "${want}" | sort | paste -sd, -)"
+    got="$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.conditions.ref_name.exclude[]] | sort | join(",")')"
+    is "branch naming: ${#PREFIXES[@]} prefixes + main excluded" "${got}" "${want}"
+    is "branch naming: includes" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~ALL"
+    is "branch naming: rules" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.rules[].type] | join(",")')" creation
+    is "branch naming: enforcement" "$(gh api "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
+  fi
+  id="$(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.name=="main") | .id')"
+  if [[ -z "${id}" ]]; then bad "ruleset 'main' missing"; else
+    got="$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.rules[].type] | sort | join(",")')"
+    for f in pull_request required_linear_history required_status_checks; do
+      [[ ",${got}," == *",$f,"* ]] && ok "main: $f" || bad "main: no $f rule"
+    done
+    want="$(printf '%s\n' "${CHECKS[@]}" | sort | paste -sd, -)"
+    is "main: required checks" \
+      "$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context] | sort | join(",")')" "${want}"
+    is "main: up to date before merging" \
+      "$(gh api "repos/${REPO}/rulesets/${id}" --jq '.rules[] | select(.type=="required_status_checks") | .parameters.strict_required_status_checks_policy')" true
+    is "main: targets the default branch" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~DEFAULT_BRANCH"
+    is "main: enforcement" "$(gh api "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
+  fi
+
+  echo
+  if [[ "${FAILS}" -eq 0 ]]; then echo "${GREEN}Onboarded: everything checks out.${OFF}"
+  else echo "${RED}${FAILS} problem(s).${OFF}"; exit 1; fi
+}
+
+# ----------------------------------------------------------------- main ----
+
+if [[ "${CMD}" != init ]]; then
+  command -v gh > /dev/null || die "gh is required"
+  REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" || die "gh can't see this repo"
+  [[ -n "${REVIEWER}" ]] || REVIEWER="$(gh api user --jq .login)"
+fi
+
+case "${CMD}" in
+  init)  init ;;
+  apply) apply ;;
+  check) check ;;
+esac

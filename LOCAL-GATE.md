@@ -71,6 +71,9 @@ correct rather than two that drift.
 
 ## Installing it in a repo
 
+`local/bin/onboard init` does all of this section (README.md, "Onboarding a
+repo"). By hand:
+
 Copy `local/bin/ci`, `local/bin/signoff` and `local/githooks/pre-push` into
 the repo as `bin/ci`, `bin/signoff` and `.githooks/pre-push`, then:
 

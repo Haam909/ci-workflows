@@ -18,7 +18,8 @@ actions/
 SETUP-GITHUB.md                step-by-step setup, no prior CI experience assumed
 LOCAL-GATE.md                  pre-push hook, local unit tests, signoff
 tests/                         self-test manifest and fixture projects
-local/                         bin/ci, bin/signoff, pre-push hook to copy into a repo
+local/                         bin/ci, bin/signoff, pre-push hook to copy into a repo;
+                               bin/onboard, which sets a repo up
 examples/.github/              copy into a consuming repo as-is
   components.yml               the manifest
   workflows/
@@ -179,6 +180,26 @@ Without `--signer-repo` it fails with `verifying with issuer "sigstore.dev"`.
 `SHA256SUMS` in the release covers every asset: `sha256sum -c SHA256SUMS`.
 
 ## Onboarding a repo
+
+`local/bin/onboard` does steps 1–6 below and the two rulesets ("Rulesets"),
+drafting step 2's `components.yml` for you to review. Run it from the repo's
+clone, on a `main` that nobody has protected yet:
+
+```bash
+../ci-workflows/local/bin/onboard init    # files, gate, lock files; drafts components.yml
+#   review .github/components.yml, delete each "# onboard: check this" marker
+../ci-workflows/local/bin/onboard apply   # bin/ci, commit to main [skip ci], v0.1.0,
+                                          # environments, both rulesets, then check
+../ci-workflows/local/bin/onboard check   # any time: what's missing or different
+```
+
+`--reviewer LOGIN` sets who approves releases (default: you).
+`--no-deploy-to-test` leaves out the merge trigger, for a repo with nowhere to
+deploy yet; pass it to `check` too. It's safe to re-run. It adds what's
+missing and never overwrites an existing workflow, environment or ruleset;
+`check` names any that differ. Azure (step 7) stays manual.
+
+By hand:
 
 1. Copy `examples/.github/` into the repo root. Keep the `permissions:` block
    in each trigger: a repo whose default token is read-only (the default for
