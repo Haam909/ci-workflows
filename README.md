@@ -183,7 +183,7 @@ Without `--signer-repo` it fails with `verifying with issuer "sigstore.dev"`.
 
 `local/bin/onboard` does steps 1–6 below and the two rulesets ("Rulesets"),
 drafting step 2's `components.yml` for you to review. Run it from the repo's
-clone, on a `main` that nobody has protected yet:
+clone, on `main`:
 
 ```bash
 ../ci-workflows/local/bin/onboard init    # files, gate, lock files; drafts components.yml
@@ -198,6 +198,12 @@ clone, on a `main` that nobody has protected yet:
 deploy yet; pass it to `check` too. It's safe to re-run. It adds what's
 missing and never overwrites an existing workflow, environment or ruleset;
 `check` names any that differ. Azure (step 7) stays manual.
+
+If `main` is already protected, `apply` can't push to it. It moves its commit
+to `chore/onboard-ci`, opens a pull request and stops. Once that PR's checks
+are green, run `apply` again: it squash-merges the PR with the skip marker on
+the merge commit only (the PR's own commit has none, or its checks wouldn't
+run), so adding the merge trigger doesn't deploy, then carries on.
 
 By hand:
 
