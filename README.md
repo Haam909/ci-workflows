@@ -167,6 +167,17 @@ because the job behind the gate already passed, and the tag isn't pushed twice.
 The failed attempt keeps its `failure` deployment record; the re-run adds a
 new one.
 
+**Checking a release's provenance.** The attestation is signed by this repo's
+release workflow, not by the consuming repo, so name both:
+
+```bash
+gh release download vX.Y.Z -R OWNER/REPO
+gh attestation verify api-X.Y.Z.zip -R OWNER/REPO --signer-repo Haam909/ci-workflows
+```
+
+Without `--signer-repo` it fails with `verifying with issuer "sigstore.dev"`.
+`SHA256SUMS` in the release covers every asset: `sha256sum -c SHA256SUMS`.
+
 ## Onboarding a repo
 
 1. Copy `examples/.github/` into the repo root. Keep the `permissions:` block
