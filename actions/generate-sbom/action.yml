@@ -48,6 +48,5 @@ runs:
             dotnet CycloneDX "$(jq -r '.project' <<< "$C")" \
               --output "${GITHUB_WORKSPACE}/_artifacts" \
               --filename "${NAME}-${VERSION}.cdx.json" --json \
-              --set-version "${VERSION}" ;;
         esac
         echo "sbom=${OUT}" >> "$GITHUB_OUTPUT"
