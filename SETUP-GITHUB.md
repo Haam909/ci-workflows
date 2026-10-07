@@ -313,10 +313,13 @@ number goes up. A branch called `my-changes` tells the system nothing.
 - New **branch** ruleset, name it "branch naming"
 - Enforcement status: **Active**
 - Target branches → **Include all branches**
-- Then **Exclude by pattern**, once each, for: `main`, `feature/**`,
+- Then **Exclude by pattern**, once each, for: your default branch (`main`
+  or `master`), `feature/**`,
   `feat/**`, `fix/**`, `hotfix/**`, `bugfix/**`, `breaking/**`, `chore/**`,
   `docs/**`, `refactor/**`, `test/**`, `ci/**`, `build/**`, `perf/**`,
-  `deps/**`, `dependabot/**`. Each pattern is its own target. Pasted as one
+  `deps/**`, `dependabot/**`. That list is
+  `actions/derive-version/prefixes` in ci-workflows, which version derivation
+  and the PR gate read too. Each pattern is its own target. Pasted as one
   comma-separated list, it becomes a single pattern that matches no branch,
   and every new branch is refused.
 - Under Rules, tick **Restrict creations**

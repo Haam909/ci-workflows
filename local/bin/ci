@@ -112,7 +112,9 @@ for (( i=0; i<COUNT; i++ )); do
       case "${RUNTIME}" in
         node)   cmd="npm ci" ;;
         dotnet) cmd="${RESTORE}" ;;
-        python) cmd="if [ -f requirements.lock.txt ]; then pip install --require-hashes -r requirements.lock.txt; else pip install -r requirements.txt; fi" ;;
+        # A package with only a pyproject.toml installs itself, editable, with
+        # its dev extra (pip warns and carries on if there is none).
+        python) cmd="if [ -f requirements.lock.txt ]; then python -m pip install --require-hashes -r requirements.lock.txt; elif [ -f requirements.txt ]; then python -m pip install -r requirements.txt; else python -m pip install -e '.[dev]'; fi" ;;
       esac
     fi
     step "${NAME}: install" "(cd \"${DIR}\" && ${cmd})"
@@ -131,7 +133,8 @@ for (( i=0; i<COUNT; i++ )); do
       case "${RUNTIME}" in
         node)   cmd="npm run lint --if-present" ;;
         dotnet) cmd="dotnet format \"${PROJECT}\" --verify-no-changes --no-restore" ;;
-        python) cmd="ruff check . && ruff format --check ." ;;
+        # As modules: pip often puts the scripts in a folder that isn't on PATH.
+        python) cmd="python -m ruff check . && python -m ruff format --check ." ;;
       esac
     fi
     step "${NAME}: lint" "(cd \"${DIR}\" && ${cmd})"
@@ -141,7 +144,7 @@ for (( i=0; i<COUNT; i++ )); do
       case "${RUNTIME}" in
         node)   cmd="[ -f tsconfig.json ] && npx --no-install tsc --noEmit || echo 'no tsconfig; skipped'" ;;
         dotnet) cmd="dotnet build \"${PROJECT}\" --no-restore -c Release -warnaserror" ;;
-        python) cmd="command -v mypy > /dev/null && mypy . || echo 'mypy not installed; skipped'" ;;
+        python) cmd="python -m mypy --version > /dev/null 2>&1 && python -m mypy . || echo 'mypy not installed; skipped'" ;;
       esac
     fi
     step "${NAME}: typecheck" "(cd \"${DIR}\" && ${cmd})"
@@ -152,7 +155,7 @@ for (( i=0; i<COUNT; i++ )); do
   if [[ -z "$cmd" ]]; then
     case "${RUNTIME}" in
       node)   cmd="CI=true npm test" ;;
-      python) cmd="pytest -m 'not integration'" ;;
+      python) cmd="python -m pytest -m 'not integration'" ;;
       dotnet)
         if [[ -z "${TESTPROJ}" ]]; then
           echo "${GREY}── ${NAME}: no test-project declared, skipping${OFF}"; continue
@@ -170,7 +173,7 @@ for (( i=0; i<COUNT; i++ )); do
     if [[ -z "$cmd" ]]; then
       case "${RUNTIME}" in
         node)   cmd="npm run test:integration" ;;
-        python) cmd="pytest -m integration" ;;
+        python) cmd="python -m pytest -m integration" ;;
         dotnet) cmd="dotnet test \"${INTEGRATION}\" -c Release --no-restore --filter \"Category=Integration\"" ;;
       esac
     fi

@@ -2,7 +2,7 @@
 # .githooks/pre-push
 #
 # Runs before anything leaves your machine:
-#   1. is this branch's root current with main?
+#   1. is this branch's root current with the default branch?
 #   2. do the checks pass? (lint, typecheck, unit tests, integration tests)
 # Then, once the push lands, records a signoff status against the pushed SHA.
 #
@@ -14,8 +14,12 @@
 
 set -uo pipefail
 
-MAIN="${CI_MAIN_BRANCH:-main}"
 REMOTE="${1:-origin}"
+# The remote's default branch, as the clone recorded it. CI_MAIN_BRANCH
+# overrides; `git remote set-head origin --auto` refreshes a stale one.
+MAIN="${CI_MAIN_BRANCH:-$(git symbolic-ref --quiet --short "refs/remotes/${REMOTE}/HEAD" 2> /dev/null)}"
+MAIN="${MAIN#"${REMOTE}"/}"
+MAIN="${MAIN:-main}"
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}" || exit 1
 

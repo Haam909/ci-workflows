@@ -38,6 +38,11 @@ The staleness check happens twice on purpose. Locally it's advice and can be
 skipped. In CI it's enforcement, because main can move between your push and
 your merge.
 
+"main" here is the repo's default branch, whatever it's called. The hook reads
+it from the clone (`origin/HEAD`); `git remote set-head origin --auto`
+refreshes that if the default branch was renamed, and `CI_MAIN_BRANCH`
+overrides it. The PR gate compares with the PR's base branch.
+
 ## What runs where
 
 | | Local pre-push | PR | Merge to main |

@@ -1,7 +1,8 @@
 name: 'Derive next version'
 description: >-
   Derives the next semver from the branch prefixes of PRs merged since the
-  last release tag. Optionally appends a prerelease suffix.
+  last release tag (bumps per prefix: ./prefixes). Optionally appends a
+  prerelease suffix.
 
 inputs:
   sha:
@@ -37,6 +38,7 @@ runs:
         TARGET_SHA: ${{ inputs.sha }}
         FORCE_MAJOR: ${{ inputs.force-major }}
         PRERELEASE: ${{ inputs.prerelease }}
+        PREFIXES: ${{ github.action_path }}/prefixes
       run: |
         set -euo pipefail
 
@@ -71,15 +73,11 @@ runs:
             fi
             while read -r ref; do
               [[ -z "${ref}" ]] && continue
-              case "${ref}" in
-                breaking/*)                      this=major ;;
-                feature/*|feat/*)                this=minor ;;
-                fix/*|hotfix/*|bugfix/*)         this=patch ;;
-                chore/*|docs/*|refactor/*|test/*|ci/*|build/*|perf/*|deps/*|dependabot/*)
-                                                 this=patch ;;
-                *) echo "::warning::Unrecognised prefix '${ref}' on ${sha:0:7}; treating as patch."
-                   this=patch ;;
-              esac
+              this="$(awk -v p="${ref%%/*}" '!/^#/ && $1 == p { print $2 }' "${PREFIXES}")"
+              if [[ "${ref}" != */* || -z "${this}" ]]; then
+                echo "::warning::Unrecognised prefix '${ref}' on ${sha:0:7}; treating as patch."
+                this=patch
+              fi
               SEEN+="  ${this}  ${ref}"$'\n'
               if (( $(rank "${this}") > $(rank "${BUMP}") )); then BUMP="${this}"; fi
             done <<< "${refs}"

@@ -34,18 +34,20 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # The hook checked this before the push, but main can move between a
+      # The hook checked this before the push, but the base can move between a
       # push and a merge, so it is enforced here rather than just advised.
-      - name: Branch must be current with main
+      - name: Branch must be current with its base
+        env:
+          BASE: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          git fetch --quiet --no-tags origin main
-          if ! git merge-base --is-ancestor origin/main HEAD; then
-            BEHIND=$(git rev-list --count HEAD..origin/main)
-            echo "::error::main has moved on by ${BEHIND} commit(s). Rebase, re-run bin/ci, and push again."
+          git fetch --quiet --no-tags origin "${BASE}"
+          if ! git merge-base --is-ancestor "origin/${BASE}" HEAD; then
+            BEHIND=$(git rev-list --count "HEAD..origin/${BASE}")
+            echo "::error::${BASE} has moved on by ${BEHIND} commit(s). Rebase, re-run bin/ci, and push again."
             exit 1
           fi
-          echo "Current with main."
+          echo "Current with ${BASE}."
 
       # The developer machine ran the checks; this confirms it happened for
       # this exact commit. A new commit has no signoff.
@@ -70,12 +72,6 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: Check branch prefix
-        run: |
-          case "${{ github.head_ref }}" in
-            breaking/*|feature/*|feat/*|fix/*|hotfix/*|bugfix/*|chore/*|docs/*|refactor/*|test/*|ci/*|build/*|perf/*|deps/*|dependabot/*)
-              echo "OK: ${{ github.head_ref }}" ;;
-            *)
-              echo "::error::Branch '${{ github.head_ref }}' has no recognised prefix. Version derivation needs one."
-              exit 1 ;;
-          esac
+      - uses: Haam909/ci-workflows/actions/check-branch-name@v1
+        with:
+          branch: ${{ github.head_ref }}

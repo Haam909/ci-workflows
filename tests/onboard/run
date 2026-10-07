@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# tests/onboard/run — onboard real repos in every configuration and check the
+# whole path: onboard init/apply/check, a feature PR through the gate, and a
+# release whose draft assets are verified.
+#
+#   tests/onboard/run L1 C4 ...     run these rows
+#   tests/onboard/run --all         every row in rows.sh
+#   tests/onboard/run --list        list the rows
+#
+# Options (environment):
+#   CIW_UNDER_TEST   ci-workflows checkout whose local/bin/onboard and examples/
+#                    are used (default: this checkout)
+#   CIW_REF          ref the sandbox triggers call (default: v1)
+#   OWNER            account that owns the sandboxes (default: the gh user)
+#   KEEP_GOING=1     with several rows, don't stop at the first failure
+#   POOL             number of sandboxes (default: 10)
+#
+# Rows run in a pool of sandbox repos, ${OWNER}/ciw-sbx-01..${POOL:-10}, each
+# reset (not deleted) before a row uses it. Several runs can go at once; each
+# row waits for a free sandbox. Results go to results/<row>.md.
+#
+# Needs: bash, git, gh (repo + workflow scopes), yq, jq, dotnet, node, python.
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CIW_UNDER_TEST="${CIW_UNDER_TEST:-$(cd "${HERE}/../.." && pwd)}"
+CIW_REF="${CIW_REF:-v1}"
+OWNER="${OWNER:-$(gh api user --jq .login)}"
+ONBOARD="${CIW_UNDER_TEST}/local/bin/onboard"
+WORK="${TMPDIR:-${TEMP:-/tmp}}/ciw-onboard"
+RESULTS="${HERE}/results"
+mkdir -p "${WORK}" "${RESULTS}"
+
+# shellcheck source=rows.sh
+source "${HERE}/rows.sh"
+# shellcheck source=lib.sh
+source "${HERE}/lib.sh"
+
+case "${1:-}" in
+  ""|-h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --list) declare -F | sed -n 's/^declare -f row_//p'; exit 0 ;;
+  --all)  mapfile -t ROWS < <(declare -F | sed -n 's/^declare -f row_//p') ;;
+  *)      ROWS=("$@") ;;
+esac
+
+for t in git gh yq jq dotnet node npm python; do command -v "$t" > /dev/null || { echo "$t is required" >&2; exit 2; }; done
+
+FAILED_ROWS=()
+for row in "${ROWS[@]}"; do
+  declare -F "row_${row}" > /dev/null || { echo "no row ${row}" >&2; exit 2; }
+  if run_row "${row}"; then echo "PASS ${row}"; else echo "FAIL ${row}"; FAILED_ROWS+=("${row}"); [[ "${KEEP_GOING:-}" == 1 ]] || break; fi
+done
+
+[[ ${#FAILED_ROWS[@]} -eq 0 ]] || { echo "failed: ${FAILED_ROWS[*]}"; exit 1; }
