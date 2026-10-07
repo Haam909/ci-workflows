@@ -217,10 +217,12 @@ jobs:
                 cyclonedx-py environment -o "${OUT}" --output-format JSON
               fi ;;
             dotnet)
+              # Without --set-version the BOM names the component 0.0.0.
               dotnet tool install --global CycloneDX
               dotnet CycloneDX "$(jq -r '.project' <<< "$C")" \
                 --output "${GITHUB_WORKSPACE}/_artifacts" \
-                --filename "${{ matrix.component.name }}-${VERSION}.cdx.json" --json ;;
+                --filename "${{ matrix.component.name }}-${VERSION}.cdx.json" --json \
+                --set-version "${VERSION}" ;;
           esac
 
       - uses: sigstore/cosign-installer@v3
