@@ -1,0 +1,9 @@
+{
+  "name": "selftest-node-app",
+  "version": "0.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "ms": "2.1.3" },
+  "devDependencies": { "is-number": "7.0.0" }
+}

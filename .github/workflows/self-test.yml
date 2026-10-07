@@ -1,0 +1,106 @@
+# Haam909/ci-workflows/.github/workflows/self-test.yml
+#
+# Tests this repo's own actions before `v1` moves: builds each fixture in
+# tests/components.yml with the actions from this checkout (not @v1), then
+# checks the artifact and the SBOM. No consumer repo, release or version is
+# involved.
+#
+# Container targets aren't covered: they need a registry to push to.
+
+name: self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      components: ${{ steps.read.outputs.components }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: echo "components=$(yq -o=json -I=0 '.components' tests/components.yml)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.discover.outputs.components) }}
+    name: ${{ matrix.component.name }}
+    env:
+      VERSION: '1.2.3'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./actions/install-toolchain
+        with:
+          component: ${{ toJSON(matrix.component) }}
+
+      - id: build
+        uses: ./actions/build-artifact
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          version: ${{ env.VERSION }}
+
+      - id: sbom
+        uses: ./actions/generate-sbom
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          version: ${{ env.VERSION }}
+
+      - name: Check artifact and SBOM
+        env:
+          C: ${{ toJSON(matrix.component) }}
+          ARTIFACT: ${{ steps.build.outputs.artifact }}
+          SBOM: ${{ steps.sbom.outputs.sbom }}
+        run: |
+          set -euo pipefail
+          FAIL=0
+          bad() { echo "::error::$1"; FAIL=1; }
+          list() { jq -r --arg k "$1" '.test[$k] // [] | .[]' <<< "$C"; }
+          norm() { tr 'A-Z_' 'a-z-'; }
+
+          echo "Artifacts:"; ls -l _artifacts
+
+          # The build's own output must be the file the glob names.
+          GLOB="$(jq -r '.test.artifact' <<< "$C")"
+          [[ "$(basename "${ARTIFACT}")" == ${GLOB} ]] \
+            || bad "artifact is $(basename "${ARTIFACT}"), expected ${GLOB}"
+          [[ "$(basename "${ARTIFACT}")" == *"${VERSION}"* ]] \
+            || bad "artifact name doesn't carry ${VERSION}"
+
+          case "${ARTIFACT}" in
+            *.tgz) ENTRIES="$(tar -tzf "${ARTIFACT}")" ;;
+            *)     ENTRIES="$(unzip -Z1 "${ARTIFACT}")" ;;
+          esac
+          while read -r e; do
+            [[ -z "$e" ]] && continue
+            grep -qxF "$e" <<< "${ENTRIES}" || bad "artifact is missing ${e}"
+          done <<< "$(list entries)"
+          while read -r e; do
+            [[ -z "$e" ]] && continue
+            ! grep -q "^${e}" <<< "${ENTRIES}" || bad "artifact should not contain ${e}"
+          done <<< "$(list forbid-entries)"
+
+          ROOT="$(jq -r '.metadata.component.version // "none"' "${SBOM}")"
+          [[ "${ROOT}" == "${VERSION}" ]] || bad "SBOM names the component at ${ROOT}, expected ${VERSION}"
+          DEPS="$(jq -r '.components[]?.name' "${SBOM}" | norm)"
+          echo "SBOM: $(jq -c '.metadata.component | {name, version}' "${SBOM}"), components: $(tr '\n' ' ' <<< "${DEPS}")"
+          while read -r d; do
+            [[ -z "$d" ]] && continue
+            grep -qxF "$(norm <<< "$d")" <<< "${DEPS}" || bad "SBOM is missing ${d}"
+          done <<< "$(list deps)"
+          while read -r d; do
+            [[ -z "$d" ]] && continue
+            ! grep -qxF "$(norm <<< "$d")" <<< "${DEPS}" || bad "SBOM should not list ${d}"
+          done <<< "$(list forbid-deps)"
+
+          exit "${FAIL}"

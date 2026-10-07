@@ -194,54 +194,10 @@ jobs:
       # ---------- SBOM: release deliverable, generated once, here ----------
 
       - name: SBOM
-        working-directory: ${{ matrix.component.path || '.' }}
-        env:
-          C: ${{ toJSON(matrix.component) }}
-          VERSION: ${{ needs.resolve.outputs.version }}
-        run: |
-          set -euo pipefail
-          OUT="${GITHUB_WORKSPACE}/_artifacts/${{ matrix.component.name }}-${VERSION}.cdx.json"
-          mkdir -p "${GITHUB_WORKSPACE}/_artifacts"
-          case "$(jq -r '.runtime' <<< "$C")" in
-            node)
-              npx --yes @cyclonedx/cyclonedx-npm --omit dev --output-format JSON --output-file "${OUT}" ;;
-            python)
-              # From the pinned requirements, so build tooling on the runner
-              # doesn't end up listed as a shipped dependency.
-              # The tool gets its own venv, so it never lists itself.
-              python -m venv "${RUNNER_TEMP}/cyclonedx"
-              "${RUNNER_TEMP}/cyclonedx/bin/pip" install --quiet cyclonedx-bom
-              CDX="${RUNNER_TEMP}/cyclonedx/bin/cyclonedx-py"
-              # cyclonedx-py takes the BOM's own component only from
-              # pyproject.toml (build-artifact has stamped its version).
-              # Without one, or with a dynamic version, add it here.
-              ROOT=()
-              [[ -f pyproject.toml ]] && ROOT=(--pyproject pyproject.toml)
-              if [[ -f requirements.lock.txt ]]; then
-                "${CDX}" requirements "${ROOT[@]}" requirements.lock.txt -o "${OUT}" --output-format JSON
-              elif [[ -f requirements.txt ]]; then
-                "${CDX}" requirements "${ROOT[@]}" requirements.txt -o "${OUT}" --output-format JSON
-              else
-                # The runner's Python also holds dev extras and build
-                # tooling. Install just the project, without extras, into
-                # a pip-less venv and list that.
-                python -m venv --without-pip "${RUNNER_TEMP}/sbom-env"
-                SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION}" \
-                  python -m pip --python "${RUNNER_TEMP}/sbom-env/bin/python" install --quiet .
-                "${CDX}" environment "${ROOT[@]}" -o "${OUT}" --output-format JSON "${RUNNER_TEMP}/sbom-env/bin/python"
-              fi
-              jq --arg n "${{ matrix.component.name }}" --arg v "${VERSION}" \
-                '.metadata.component //= {type: "application", name: $n, "bom-ref": "\($n)@\($v)"}
-                 | .metadata.component.version //= $v' "${OUT}" > "${OUT}.tmp"
-              mv "${OUT}.tmp" "${OUT}" ;;
-            dotnet)
-              # Without --set-version the BOM names the component 0.0.0.
-              dotnet tool install --global CycloneDX
-              dotnet CycloneDX "$(jq -r '.project' <<< "$C")" \
-                --output "${GITHUB_WORKSPACE}/_artifacts" \
-                --filename "${{ matrix.component.name }}-${VERSION}.cdx.json" --json \
-                --set-version "${VERSION}" ;;
-          esac
+        uses: Haam909/ci-workflows/actions/generate-sbom@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          version: ${{ needs.resolve.outputs.version }}
 
       - uses: sigstore/cosign-installer@v3
 

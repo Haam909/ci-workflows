@@ -1,0 +1,71 @@
+# Self-test manifest: one fixture per runtime and target that builds without
+# Azure. Read by .github/workflows/self-test.yml, which builds each one with
+# the actions in this repo and checks the result against `test:`.
+#
+#   artifact       glob the build must produce in _artifacts/
+#   entries        paths that must be inside the artifact
+#   forbid-entries path prefixes that must not be
+#   deps           SBOM components that must be listed
+#   forbid-deps    SBOM components that must not be
+#
+# SBOM names are compared lower-cased with _ as -. Every SBOM must also name
+# the component itself at the build version.
+components:
+  - name: dotnet-app
+    runtime: dotnet
+    target: app-service
+    project: tests/fixtures/dotnet-app/DotnetApp.csproj
+    dotnet-version: '10.0.x'
+    test:
+      artifact: dotnet-app-*.zip
+      entries: [DotnetApp.dll, Newtonsoft.Json.dll, web.config]
+      deps: [newtonsoft.json]
+
+  - name: dotnet-pkg
+    runtime: dotnet
+    target: package
+    project: tests/fixtures/dotnet-pkg/DotnetPkg.csproj
+    dotnet-version: '10.0.x'
+    test:
+      artifact: CiWorkflows.SelfTest.DotnetPkg.*.nupkg
+      entries: [lib/net10.0/DotnetPkg.dll]
+
+  - name: node-app
+    runtime: node
+    target: app-service
+    path: tests/fixtures/node-app
+    test:
+      artifact: node-app-*.zip
+      entries: [server.js, package.json, node_modules/ms/package.json]
+      forbid-entries: [node_modules/is-number/]
+      deps: [ms]
+      forbid-deps: [is-number]
+
+  - name: node-pkg
+    runtime: node
+    target: package
+    path: tests/fixtures/node-pkg
+    test:
+      artifact: haam909-selftest-node-pkg-*.tgz
+      entries: [package/index.js, package/package.json]
+      deps: [ms]
+      forbid-deps: [is-number]
+
+  - name: py-app
+    runtime: python
+    target: app-service
+    path: tests/fixtures/py-app
+    test:
+      artifact: py-app-*.zip
+      entries: [app.py, requirements.txt]
+      deps: [tomli-w]
+
+  - name: py-pkg
+    runtime: python
+    target: package
+    path: tests/fixtures/py-pkg
+    test:
+      artifact: selftest_py_pkg-*.whl
+      entries: [selftest_pkg/__init__.py]
+      deps: [tomli-w]
+      forbid-deps: [iniconfig, cyclonedx-bom, build, pip]
