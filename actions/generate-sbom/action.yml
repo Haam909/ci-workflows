@@ -47,6 +47,6 @@ runs:
             dotnet tool install --global CycloneDX
             dotnet CycloneDX "$(jq -r '.project' <<< "$C")" \
               --output "${GITHUB_WORKSPACE}/_artifacts" \
-              --filename "${NAME}-${VERSION}.cdx.json" --json \
+              --filename "${NAME}-${VERSION}.cdx.json" --json ;;
         esac
         echo "sbom=${OUT}" >> "$GITHUB_OUTPUT"
