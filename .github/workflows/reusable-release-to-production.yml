@@ -194,45 +194,10 @@ jobs:
       # ---------- SBOM: release deliverable, generated once, here ----------
 
       - name: SBOM
-        working-directory: ${{ matrix.component.path || '.' }}
-        env:
-          C: ${{ toJSON(matrix.component) }}
-          VERSION: ${{ needs.resolve.outputs.version }}
-        run: |
-          set -euo pipefail
-          OUT="${GITHUB_WORKSPACE}/_artifacts/${{ matrix.component.name }}-${VERSION}.cdx.json"
-          mkdir -p "${GITHUB_WORKSPACE}/_artifacts"
-          case "$(jq -r '.runtime' <<< "$C")" in
-            node)
-              npx --yes @cyclonedx/cyclonedx-npm --omit dev --output-format JSON --output-file "${OUT}" ;;
-            python)
-              # From the pinned requirements, so build tooling on the runner
-              # doesn't end up listed as a shipped dependency.
-              pip install --quiet cyclonedx-bom
-              # cyclonedx-py takes the BOM's own component only from
-              # pyproject.toml (build-artifact has stamped its version).
-              # Without one, or with a dynamic version, add it here.
-              ROOT=()
-              [[ -f pyproject.toml ]] && ROOT=(--pyproject pyproject.toml)
-              if [[ -f requirements.lock.txt ]]; then
-                cyclonedx-py requirements "${ROOT[@]}" requirements.lock.txt -o "${OUT}" --output-format JSON
-              elif [[ -f requirements.txt ]]; then
-                cyclonedx-py requirements "${ROOT[@]}" requirements.txt -o "${OUT}" --output-format JSON
-              else
-                cyclonedx-py environment "${ROOT[@]}" -o "${OUT}" --output-format JSON
-              fi
-              jq --arg n "${{ matrix.component.name }}" --arg v "${VERSION}" \
-                '.metadata.component //= {type: "application", name: $n, "bom-ref": "\($n)@\($v)"}
-                 | .metadata.component.version //= $v' "${OUT}" > "${OUT}.tmp"
-              mv "${OUT}.tmp" "${OUT}" ;;
-            dotnet)
-              # Without --set-version the BOM names the component 0.0.0.
-              dotnet tool install --global CycloneDX
-              dotnet CycloneDX "$(jq -r '.project' <<< "$C")" \
-                --output "${GITHUB_WORKSPACE}/_artifacts" \
-                --filename "${{ matrix.component.name }}-${VERSION}.cdx.json" --json \
-                --set-version "${VERSION}" ;;
-          esac
+        uses: Haam909/ci-workflows/actions/generate-sbom@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          version: ${{ needs.resolve.outputs.version }}
 
       - uses: sigstore/cosign-installer@v3
 

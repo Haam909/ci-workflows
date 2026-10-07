@@ -8,13 +8,16 @@ manifest and three thin wrappers.
   reusable-verify-pull-request.yml      reusable — PR gate
   reusable-deploy-to-test.yml           reusable — merge to main
   reusable-release-to-production.yml    reusable — manual release
+  self-test.yml                         this repo's own test, on PRs and main
 actions/
   install-toolchain/           toolchain + locked dependency install
   build-artifact/              build + version stamp + package
+  generate-sbom/               CycloneDX SBOM for a release build
   deliver-artifact/            deploy or publish to feed
   derive-version/              semver from branch prefixes
 SETUP-GITHUB.md                step-by-step setup, no prior CI experience assumed
 LOCAL-GATE.md                  pre-push hook, local unit tests, signoff
+tests/                         self-test manifest and fixture projects
 local/                         bin/ci, bin/signoff, pre-push hook to copy into a repo
 examples/.github/              copy into a consuming repo as-is
   components.yml               the manifest
@@ -318,6 +321,13 @@ this rule needs org-owned repos; that setup is untested. Without the bypass,
 an active rule blocks the release's own tag push.
 
 ## Versioning this repo
+
+Change this repo through a pull request. `self-test.yml` builds each fixture
+in `tests/components.yml` with the actions from that branch (not `@v1`) and
+checks the artifact's name and contents and the SBOM's root version and
+component list. It covers every runtime with the `app-service` and `package`
+targets, and needs no consumer repo, release or Azure. Move `v1` only after it
+passes on `main`. Container builds aren't covered: they need a registry.
 
 Consumers pin `@v1`. Move `v1` forward for compatible changes; cut `v2` for
 anything needing manifest changes — thirty repos means a breaking change here
