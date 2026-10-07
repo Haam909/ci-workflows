@@ -173,8 +173,16 @@ components:
 - `target` — where it eventually ships. Ignore this for now; it doesn't
   affect pull request checks.
 - `project` — for dotnet, the path to the `.csproj`.
+- `test-project` — for dotnet, the unit test `.csproj`. Without it the
+  component's unit tests are skipped.
+- `dotnet-version` — the SDK CI installs, `9.0.x` unless you say otherwise.
+  A project targeting `net10.0` needs `dotnet-version: '10.0.x'`.
 - `path` — for node and python, the folder containing `package.json` or
   `requirements.txt`. Leave it out if that's the repo root.
+
+Delete the example's comment block as well. `bin/ci` searches the whole file
+for the word `integration`, comments included, and refuses to run without
+Docker or Podman when it finds it.
 
 Each component becomes its own parallel job when building and deploying.
 Pull request checks don't depend on it.
@@ -188,7 +196,8 @@ green `local/ci` signoff from your machine.
 
 **Install the local gate first** — the PR gate fails without it. Follow
 "Installing it in a repo" in LOCAL-GATE.md (copy three scripts, mark them
-executable, `git config core.hooksPath .githooks`). Then run `bin/ci` once by
+executable, `git config core.hooksPath .githooks`). In a .NET repo, check the
+`.gitignore` first: see the note there about `bin/`. Then run `bin/ci` once by
 hand; it needs some files you may not have yet.
 
 **C#** needs a lock file, which NuGet doesn't create unless you ask. Add to
@@ -303,8 +312,17 @@ number goes up. A branch called `my-changes` tells the system nothing.
 - Then **Exclude by pattern**, once each, for: `main`, `feature/**`,
   `feat/**`, `fix/**`, `hotfix/**`, `bugfix/**`, `breaking/**`, `chore/**`,
   `docs/**`, `refactor/**`, `test/**`, `ci/**`, `build/**`, `perf/**`,
-  `deps/**`, `dependabot/**`
+  `deps/**`, `dependabot/**`. Each pattern is its own target. Pasted as one
+  comma-separated list, it becomes a single pattern that matches no branch,
+  and every new branch is refused.
 - Under Rules, tick **Restrict creations**
+
+Check it — the second command should print 16:
+
+```bash
+gh api repos/YOURNAME/REPO/rulesets --jq '.[] | select(.name=="branch naming") | .id'
+gh api repos/YOURNAME/REPO/rulesets/ID --jq '.conditions.ref_name.exclude | length'
+```
 
 Read that as: "everything is blocked, except these." Pushing a badly named
 branch is now rejected by the server.
@@ -321,7 +339,9 @@ Belt and braces — the ruleset stops the push, the job stops the merge.
 - Tick **Require status checks to pass**, then search for and add each check:
   `ci / gate`, `ci / branch-name` and `local/ci`. (There are no
   per-component checks.)
-- Tick **Require branches to be up to date before merging**
+- Tick **Require branches to be up to date before merging**. It's a separate
+  checkbox under the status checks and easy to miss. Without it a PR that went
+  green before someone else merged stays mergeable against the newer `main`.
 - Tick **Require linear history**. Pull requests then merge by squash or
   rebase only; a merge commit is refused ("Merge commits are not allowed on
   this repository"). It keeps a branch that forked before a release from
@@ -378,18 +398,27 @@ default using `GITHUB_TOKEN`. Two rules:
 - **npm** package names must be scoped to your account:
   `"name": "@yourname/thing"` in `package.json`.
 - **NuGet** needs `<RepositoryUrl>https://github.com/YOURNAME/REPO</RepositoryUrl>`
-  in the `.csproj` so GitHub can link the package to the repo.
+  in the `.csproj` so GitHub can link the package to the repo. Without a
+  `<PackageId>` the package is named after the project file, so set one.
+  Setting or changing `PackageId` makes the test project's lock file stale
+  (it names project references by package ID): run
+  `dotnet restore --use-lock-file` and commit the lock files in the same
+  change, or the merge fails with NU1004.
 
 Python can't use GitHub Packages — there's no Python registry there. Those
 need a `feed:` pointing elsewhere; see the Package feeds section in README.md.
 
 **Check the package's visibility after the first publish.** Published from a
-public repo, the package came out **public**, and that can't be reversed.
+public repo, both the npm and the NuGet package came out **public**, and that
+can't be reversed. Deleting the package doesn't stop it either: the next merge
+to `main` publishes a new prerelease and recreates it.
 If it must stay private, publish from a private repo or to a private feed.
 
-The repo needs **Write** on the package: package page → **Package settings**
-(`https://github.com/users/YOURNAME/packages/npm/PACKAGE/settings` for an npm
-package on a personal account) → **Manage Actions access**.
+The repo needs **Write** (or **Admin**) on the package: package page →
+**Package settings** → **Manage Actions access**. On a personal account the
+settings page is `https://github.com/users/YOURNAME/packages/npm/PACKAGE/settings`,
+with `nuget` in place of `npm` for a NuGet package. The repo that first
+published the package starts with **Admin**.
 
 ---
 
@@ -441,9 +470,13 @@ The commit sits on a branch that forked before the latest release. Releasing
 it would ship without that release's changes. Choose a commit on `main` after
 the release.
 
-**`403 … permission_denied: write_package` when publishing**
+**`403 … permission_denied: write_package` (npm) or `Forbidden https://nuget.pkg.github.com/OWNER/ … 403 (Forbidden)` (NuGet) when publishing**
 The repo has only Read on the package. Package settings → **Manage Actions
 access** → set the repo to **Write**, then **Re-run failed jobs**.
+
+**`The following paths are ignored by one of your .gitignore files: bin`**
+The .NET `.gitignore` ignores every `bin/` folder. Add `!/bin/` to the end of
+`.gitignore`; see "Installing it in a repo" in LOCAL-GATE.md.
 
 **My pull request shows no checks after a push**
 If the PR has merge conflicts, GitHub doesn't start `pull_request` runs at

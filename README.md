@@ -159,8 +159,10 @@ to begin somewhere else — that's the only manual tag in the system.
 publish, a failed health check — the tag exists, the release stays a
 **draft**, and nothing has been announced. Fix the cause, then **Re-run failed
 jobs** (`gh run rerun <run-id> --failed`): that re-runs promote and the
-publish step that depended on it. The failed attempt keeps its `failure`
-deployment record; the re-run adds a new one.
+publish step that depended on it. The `release` approval isn't asked again,
+because the job behind the gate already passed, and the tag isn't pushed twice.
+The failed attempt keeps its `failure` deployment record; the re-run adds a
+new one.
 
 ## Onboarding a repo
 
@@ -234,7 +236,13 @@ Feed URLs differ per runtime — NuGet wants `.../nuget/v3/index.json`, npm
 
 **Azure Artifacts setup.** Add the same service principal used for the Azure
 deploys to the Azure DevOps organisation as a user, and give it
-**Contributor** on the feed. No PAT is created or stored.
+**Contributor** on the feed. No PAT is created or stored. The repo also needs
+the `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID` variables
+and the federated credentials from "Onboarding a repo", because the token
+comes from `azure/login`.
+
+This path hasn't been run end to end yet. Publishing to GitHub Packages has,
+for npm and NuGet; the first Azure Artifacts publish is the test of it.
 
 **Other feeds** (npmjs.org, PyPI, Artifactory, Nexus) can't use OIDC, so put
 the token in a repository secret and name it on the component:
@@ -249,7 +257,7 @@ its feed. npm packages on GitHub Packages must be scoped to the org
 (`"name": "@contoso/sdk"`).
 
 **Visibility on GitHub Packages.** A package published by this workflow from a
-**public** repo came out **public** in testing, even though GitHub documents
+**public** repo came out **public** in testing (npm and NuGet both), even though GitHub documents
 new personal-account packages as private by default. Making a package public
 can't be undone. Check the package's visibility after its first publish, and
 publish from a private repo (or a private feed) if the package must not be

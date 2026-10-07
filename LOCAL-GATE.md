@@ -79,10 +79,23 @@ chmod +x bin/ci bin/signoff .githooks/pre-push
 git config core.hooksPath .githooks
 ```
 
-On Windows `chmod` doesn't reach git, so record the executable bit directly:
+On Windows `chmod` doesn't reach git, so record the executable bit directly.
+`update-index` only works on files git already tracks, so add them first;
+otherwise it fails with "cannot add to the index - missing --add option?":
 
 ```bash
+git add bin .githooks
 git update-index --chmod=+x bin/ci bin/signoff .githooks/pre-push
+```
+
+In a .NET repo, `git add bin` fails with "The following paths are ignored by
+one of your .gitignore files". The .NET `.gitignore` (`dotnet new gitignore`)
+has `[Bb]in/`, which ignores every `bin/` folder, this one included.
+Re-include the top-level one; build output stays ignored:
+
+```
+# Local CI gate scripts
+!/bin/
 ```
 
 and keep the scripts' LF line endings — with `core.autocrlf=true` a CRLF
@@ -102,6 +115,11 @@ whatever toolchains the repo's components use. On Windows the hook runs under
 Git Bash, which ships with Git for Windows, and `yq` installs with
 `winget install --id MikeFarah.yq -e --source winget` — open a new terminal
 afterwards so it's on `PATH`.
+
+From PowerShell, `bash` can resolve to WSL (`C:\Windows\System32\bash.exe`)
+rather than Git Bash, so run `bin/ci` by hand with
+`& "C:\Program Files\Git\bin\bash.exe" bin/ci` or from a Git Bash window.
+`git push` from PowerShell is fine: git runs the hook with its own bash.
 
 ## Using it
 
