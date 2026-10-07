@@ -13,6 +13,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # A commit message containing the skip marker suppresses the push run;
+  # run it by hand then: gh workflow run self-test.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
