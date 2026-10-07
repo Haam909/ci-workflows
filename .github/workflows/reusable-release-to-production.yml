@@ -208,18 +208,27 @@ jobs:
             python)
               # From the pinned requirements, so build tooling on the runner
               # doesn't end up listed as a shipped dependency.
-              pip install --quiet cyclonedx-bom
+              # The tool gets its own venv, so it never lists itself.
+              python -m venv "${RUNNER_TEMP}/cyclonedx"
+              "${RUNNER_TEMP}/cyclonedx/bin/pip" install --quiet cyclonedx-bom
+              CDX="${RUNNER_TEMP}/cyclonedx/bin/cyclonedx-py"
               # cyclonedx-py takes the BOM's own component only from
               # pyproject.toml (build-artifact has stamped its version).
               # Without one, or with a dynamic version, add it here.
               ROOT=()
               [[ -f pyproject.toml ]] && ROOT=(--pyproject pyproject.toml)
               if [[ -f requirements.lock.txt ]]; then
-                cyclonedx-py requirements "${ROOT[@]}" requirements.lock.txt -o "${OUT}" --output-format JSON
+                "${CDX}" requirements "${ROOT[@]}" requirements.lock.txt -o "${OUT}" --output-format JSON
               elif [[ -f requirements.txt ]]; then
-                cyclonedx-py requirements "${ROOT[@]}" requirements.txt -o "${OUT}" --output-format JSON
+                "${CDX}" requirements "${ROOT[@]}" requirements.txt -o "${OUT}" --output-format JSON
               else
-                cyclonedx-py environment "${ROOT[@]}" -o "${OUT}" --output-format JSON
+                # The runner's Python also holds dev extras and build
+                # tooling. Install just the project, without extras, into
+                # a pip-less venv and list that.
+                python -m venv --without-pip "${RUNNER_TEMP}/sbom-env"
+                SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION}" \
+                  python -m pip --python "${RUNNER_TEMP}/sbom-env/bin/python" install --quiet .
+                "${CDX}" environment "${ROOT[@]}" -o "${OUT}" --output-format JSON "${RUNNER_TEMP}/sbom-env/bin/python"
               fi
               jq --arg n "${{ matrix.component.name }}" --arg v "${VERSION}" \
                 '.metadata.component //= {type: "application", name: $n, "bom-ref": "\($n)@\($v)"}
