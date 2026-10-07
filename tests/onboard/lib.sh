@@ -458,8 +458,8 @@ claim_sandbox() {
   while (( $(date +%s) < end )); do
     for (( i = 1; i <= ${POOL:-10}; i++ )); do
       slot="$(printf '%02d' "$i")"
-      if mkdir "${WORK}/slot-${slot}.lock" 2> /dev/null; then
-        SLOT_LOCK="${WORK}/slot-${slot}.lock"; REPO="${OWNER}/ciw-sbx-${slot}"
+      if mkdir "${LOCKS}/slot-${slot}.lock" 2> /dev/null; then
+        SLOT_LOCK="${LOCKS}/slot-${slot}.lock"; REPO="${OWNER}/ciw-sbx-${slot}"
         echo "${ROW} $$" > "${SLOT_LOCK}/owner"
         trap 'rm -rf "${SLOT_LOCK}"' EXIT
         return 0

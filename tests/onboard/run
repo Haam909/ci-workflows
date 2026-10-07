@@ -14,6 +14,7 @@
 #   OWNER            account that owns the sandboxes (default: the gh user)
 #   KEEP_GOING=1     with several rows, don't stop at the first failure
 #   POOL             number of sandboxes (default: 10)
+#   WORK, RESULTS    where clones/logs and results/<row>.md go
 #
 # Rows run in a pool of sandbox repos, ${OWNER}/ciw-sbx-01..${POOL:-10}, each
 # reset (not deleted) before a row uses it. Several runs can go at once; each
@@ -28,8 +29,10 @@ CIW_UNDER_TEST="${CIW_UNDER_TEST:-$(cd "${HERE}/../.." && pwd)}"
 CIW_REF="${CIW_REF:-v1}"
 OWNER="${OWNER:-$(gh api user --jq .login)}"
 ONBOARD="${CIW_UNDER_TEST}/local/bin/onboard"
-WORK="${TMPDIR:-${TEMP:-/tmp}}/ciw-onboard"
-RESULTS="${HERE}/results"
+WORK="${WORK:-${TMPDIR:-${TEMP:-/tmp}}/ciw-onboard}"     # clones and logs, per row
+RESULTS="${RESULTS:-${HERE}/results}"
+LOCKS="${HOME}/.ciw-sandbox-locks"                       # shared by every run on this machine
+mkdir -p "${LOCKS}"
 mkdir -p "${WORK}" "${RESULTS}"
 
 # shellcheck source=rows.sh
