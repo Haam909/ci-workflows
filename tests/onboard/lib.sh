@@ -196,21 +196,25 @@ crlf_clone_runs_gate() {
 
 # ------------------------------------------------------------ developer ----
 
-# What a developer has: a venv with the python tools, node_modules, restored
-# dotnet projects. bin/ci --install does the project-specific part.
+# What a developer has: a venv with the python tools and each component's
+# dependencies, node_modules. Set up by hand, the way a developer would, so a
+# bin/ci --install bug is reported (next) without hiding everything after it.
 dev_setup() {
-  local py=python venv="${WORK_ROW}/venv"
-  [[ -d "${venv}" ]] || "${py}" -m venv "${venv}" >> "${LOG}" 2>&1
+  local venv="${WORK_ROW}/venv" d rt
+  [[ -d "${venv}" ]] || python -m venv "${venv}" >> "${LOG}" 2>&1
   if [[ -d "${venv}/Scripts" ]]; then PATH="${venv}/Scripts:${PATH}"; else PATH="${venv}/bin:${PATH}"; fi
   export PATH VIRTUAL_ENV="${venv}"
   python -m pip install --quiet ruff pytest >> "${LOG}" 2>&1
-  logged bash bin/ci --install || { fail "bin/ci --install failed"; return 1; }
-  # Python packages are tested against their own source plus their deps.
-  local d
-  while IFS= read -r d; do
-    [[ -f "$d/pyproject.toml" ]] && python -m pip install --quiet -e "$d[dev]" >> "${LOG}" 2>&1
-  done < <(yq '.components[] | select(.runtime=="python") | (.path // ".")' .github/components.yml)
-  pass "developer setup (venv, bin/ci --install)"
+  while IFS=' ' read -r rt d; do
+    case "${rt}" in
+      python)
+        if [[ -f "$d/requirements.txt" ]]; then python -m pip install --quiet -r "$d/requirements.txt"
+        else python -m pip install --quiet -e "$d[dev]"; fi ;;
+      node) (cd "$d" && npm ci --silent --no-audit --no-fund) ;;
+    esac >> "${LOG}" 2>&1 || fail "developer setup: installing ${d} (${rt}) failed"
+  done < <(yq '.components[] | .runtime + " " + (.path // ".")' .github/components.yml)
+  pass "developer setup (venv with ruff and pytest; each component's dependencies)"
+  logged bash bin/ci --install && pass "bin/ci --install" || fail "bin/ci --install: $(last_out | grep -iE 'error|✗' | head -2 | tr '\n' ' ')"
 }
 
 # ------------------------------------------------------------ expectations ----
@@ -276,7 +280,7 @@ onboard_repo() {
   fi
   check_manifest
   sed -i 's/   # onboard: check this//' .github/components.yml
-  dev_setup || return 1
+  dev_setup
 
   local pass_no
   for pass_no in 1 2 3; do
@@ -430,10 +434,16 @@ check_assets() {
       *) art="${n}-${v}.zip" ;;
     esac
     if [[ -n "${art}" && -f "$d/${art}" ]]; then pass "${n}: ${art}"; else fail "${n}: expected artifact ${art:-?} not in the release"; continue; fi
-    [[ -f "$d/${art}.cosign.bundle" ]] && pass "${n}: cosign bundle" || fail "${n}: no ${art}.cosign.bundle"
+    if [[ "${VIS}" == private ]]; then
+      # Keyless cosign would publish a private repo's name to Sigstore's log.
+      [[ -f "$d/${art}.cosign.bundle" ]] && fail "${n}: a private repo's asset was signed to the public log" || pass "${n}: no cosign bundle (private repo)"
+    else
+      [[ -f "$d/${art}.cosign.bundle" ]] && pass "${n}: cosign bundle" || fail "${n}: no ${art}.cosign.bundle"
+    fi
     local root; root="$(jq -r '.metadata.component | "\(.name)@\(.version)"' "$d/${n}-${v}.cdx.json" 2> /dev/null)"
     [[ "${root}" == *"@${v}" ]] && pass "${n}: SBOM root ${root}" || fail "${n}: SBOM root '${root:-missing}'"
     if logged gh attestation verify "$d/${art}" -R "${REPO}" --signer-repo "${CIW_REPO}"; then pass "${n}: attestation verifies"
+    elif [[ "${VIS}" == private ]]; then note "${n}: no attestation (private repo; GitHub offers them there only with Enterprise Cloud)"
     else fail "${n}: attestation: $(last_out | grep -iE 'error|fail' | head -1)"; fi
   done < <(yq '.components[] | .name + " " + .runtime + " " + .target' .github/components.yml)
 }
@@ -486,7 +496,8 @@ run_row() {
     if declare -F pre_clone > /dev/null; then pre_clone; fi
     onboard_repo; rc=$?
     [[ "${rc}" == 2 ]] && { [[ "${ROW_OK}" == true ]] && exit 0 || exit 1; }   # stopped where the row expects
-    [[ "${rc}" == 0 && "${ROW_OK}" == true ]] || exit 1
+    # Carry on after a ✗ so one row reports everything it hits; the row fails at the end.
+    [[ "${rc}" == 0 ]] || exit 1
     feature_pr || exit 1
     release || exit 1
     [[ "${ROW_OK}" == true ]]
