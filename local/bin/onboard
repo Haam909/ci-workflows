@@ -26,6 +26,7 @@ export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
 CIW="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MANIFEST=.github/components.yml
+ONBOARD_BRANCH=chore/onboard-ci
 MARK='# onboard: check this'
 CMD="${1:-}"; [[ $# -gt 0 ]] && shift
 REVIEWER=""; DEPLOY_TO_TEST=true
@@ -214,7 +215,24 @@ ensure_ruleset() {         # name json
 }
 
 apply() {
-  local b
+  local b pr st
+  # Second run on a protected main: merge the onboarding PR, then carry on.
+  pr="$(gh pr list --head "${ONBOARD_BRANCH}" --state open --json number --jq '.[0].number // empty')"
+  if [[ -n "${pr}" ]]; then
+    say "onboarding PR #${pr}"
+    st="$(gh pr view "${pr}" --json mergeStateStatus --jq .mergeStateStatus)"
+    [[ "${st}" =~ ^(CLEAN|HAS_HOOKS|UNSTABLE)$ ]] \
+      || die "PR #${pr} can't be merged yet (${st}). Check it with: gh pr checks ${pr}"
+    # The skip marker goes on the merge commit only: it adds the merge trigger,
+    # which would otherwise deploy it. The PR's own commit has none, or its
+    # checks wouldn't run.
+    gh pr merge "${pr}" --squash --delete-branch \
+      --subject "ci: onboard to ci-workflows (#${pr}) [skip ci]" --body "" > /dev/null \
+      || die "merging PR #${pr} failed"
+    git switch --quiet main && git pull --quiet --ff-only origin main || die "can't update main after the merge"
+    done_ "merged: $(git log --oneline -1)"
+  fi
+
   say "manifest"
   [[ -f "${MANIFEST}" ]] || die "no ${MANIFEST}; run onboard init first"
   ! grep -qF "${MARK}" "${MANIFEST}" || die "${MANIFEST} still has '${MARK}' markers"
@@ -246,9 +264,26 @@ apply() {
   else
     # [skip ci]: this commit adds the merge trigger, which would otherwise deploy it.
     git commit --quiet -m "ci: onboard to ci-workflows [skip ci]" || die "commit failed"
-    git push --quiet origin main \
-      || die "push to main refused. If main is protected, merge this commit through a PR, then re-run apply."
-    done_ "$(git log --oneline -1)"
+    if git push --quiet origin main 2> /dev/null; then
+      done_ "$(git log --oneline -1)"
+    else
+      # main is protected. Move the commit to a branch, without the skip
+      # marker so the PR's checks run, and open a PR for it.
+      warn "main is protected; opening a pull request instead"
+      git branch -f "${ONBOARD_BRANCH}" HEAD
+      git reset --quiet --hard origin/main      # drops only the commit made above
+      git switch --quiet "${ONBOARD_BRANCH}"
+      git commit --quiet --amend -m "ci: onboard to ci-workflows"
+      git push --quiet -u origin "${ONBOARD_BRANCH}" || { git switch --quiet main; die "pushing ${ONBOARD_BRANCH} failed"; }
+      pr="$(gh pr create --base main --head "${ONBOARD_BRANCH}" --title "ci: onboard to ci-workflows" \
+              --body "Opened by ci-workflows' local/bin/onboard. Merge it by re-running \`onboard apply\` once its checks are green: that squash-merges it so the merge doesn't deploy, then tags the starting version and creates the environments and rulesets.")" \
+        || { git switch --quiet main; die "opening the PR failed"; }
+      git switch --quiet main
+      done_ "${pr}"
+      echo
+      echo "${BOLD}Next:${OFF} when its checks are green (${GREY}gh pr checks ${ONBOARD_BRANCH}${OFF}), run ${GREY}onboard apply${OFF} again."
+      exit 0
+    fi
   fi
 
   say "starting tag"
