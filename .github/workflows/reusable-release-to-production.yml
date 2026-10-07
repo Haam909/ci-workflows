@@ -209,13 +209,22 @@ jobs:
               # From the pinned requirements, so build tooling on the runner
               # doesn't end up listed as a shipped dependency.
               pip install --quiet cyclonedx-bom
+              # cyclonedx-py takes the BOM's own component only from
+              # pyproject.toml (build-artifact has stamped its version).
+              # Without one, or with a dynamic version, add it here.
+              ROOT=()
+              [[ -f pyproject.toml ]] && ROOT=(--pyproject pyproject.toml)
               if [[ -f requirements.lock.txt ]]; then
-                cyclonedx-py requirements requirements.lock.txt -o "${OUT}" --output-format JSON
+                cyclonedx-py requirements "${ROOT[@]}" requirements.lock.txt -o "${OUT}" --output-format JSON
               elif [[ -f requirements.txt ]]; then
-                cyclonedx-py requirements requirements.txt -o "${OUT}" --output-format JSON
+                cyclonedx-py requirements "${ROOT[@]}" requirements.txt -o "${OUT}" --output-format JSON
               else
-                cyclonedx-py environment -o "${OUT}" --output-format JSON
-              fi ;;
+                cyclonedx-py environment "${ROOT[@]}" -o "${OUT}" --output-format JSON
+              fi
+              jq --arg n "${{ matrix.component.name }}" --arg v "${VERSION}" \
+                '.metadata.component //= {type: "application", name: $n, "bom-ref": "\($n)@\($v)"}
+                 | .metadata.component.version //= $v' "${OUT}" > "${OUT}.tmp"
+              mv "${OUT}.tmp" "${OUT}" ;;
             dotnet)
               # Without --set-version the BOM names the component 0.0.0.
               dotnet tool install --global CycloneDX
