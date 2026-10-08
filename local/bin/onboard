@@ -543,7 +543,8 @@ is()  { [[ "$2" == "$3" ]] && ok "$1" || bad "$1: got '${2}', want '${3}'"; }
 
 # GitHub's reason for refusing a read, if it's the plan or visibility.
 plan_refusal() {           # path
-  local out; out="$(gh api "$1" 2>&1 > /dev/null)" && return 1
+  # gh api prints the error body, with its "message", on stdout.
+  local out; out="$(gh api "$1" 2> /dev/null)" && return 1
   grep -oiE '"message":"[^"]*(upgrade|plan|not available)[^"]*' <<< "${out}" | sed 's/"message":"//' | head -1
 }
 
