@@ -76,7 +76,9 @@ push_seed() {
     if declare -F pre_seed > /dev/null; then pre_seed; fi
     git add -A && git commit -qm "seed" && git remote add origin "https://github.com/${REPO}.git"
     for t in ${TAGS}; do git tag -a "$t" -m "$t"; done
-    git push -q --force origin "${BRANCH}" && { [[ -z "${TAGS}" ]] || git push -q --force origin --tags; }
+    # After a visibility change GitHub can still refuse writes once reads work.
+    for try in 1 2 3 4 5 6 7 8 9 10; do git push -q --force origin "${BRANCH}" && break; [[ ${try} == 10 ]] && exit 1; sleep 30; done
+    [[ -z "${TAGS}" ]] || git push -q --force origin --tags
   ) >> "${LOG}" 2>&1 || { fail "pushing the seed failed"; return 1; }
   gh api -X PATCH "repos/${REPO}" -f default_branch="${BRANCH}" > /dev/null
   for b in $(gh api "repos/${REPO}/branches?per_page=100" --jq '.[].name'); do
