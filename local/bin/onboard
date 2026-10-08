@@ -322,7 +322,7 @@ ensure_environment() {     # name [reviewers-json]
 
 ensure_ruleset() {         # name json
   local have
-  have="$(gh api "repos/${REPO}/rulesets" --jq ".[] | select(.name==\"$1\") | .id" 2> /dev/null)"
+  have="$(gh_get "repos/${REPO}/rulesets" --jq ".[] | select(.name==\"$1\") | .id")"
   if [[ -n "${have}" ]]; then skip "ruleset '$1' exists; left alone"
   else gh_create "ruleset '$1'" POST "repos/${REPO}/rulesets" "$2"; fi
 }
@@ -579,7 +579,7 @@ check() {
   [[ "${got}" -gt 0 ]] && ok "${got} v* tag(s)" || bad "no v* tag: every merge would build 0.1.0-alpha.0"
 
   say "actions"
-  got="$(gh api "repos/${REPO}/actions/permissions" --jq '"\(.enabled) \(.allowed_actions)"' 2> /dev/null)"
+  got="$(gh_get "repos/${REPO}/actions/permissions" --jq '"\(.enabled) \(.allowed_actions)"')"
   case "${got}" in
     "true all") ok "Actions enabled, all actions allowed" ;;
     "true selected")
@@ -617,7 +617,7 @@ check() {
   if [[ -n "${why}" ]]; then
     lim "rulesets unavailable here: ${why}"
   fi
-  id="$(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.name=="branch naming") | .id' 2> /dev/null)"
+  id="$(gh_get "repos/${REPO}/rulesets" --jq '.[] | select(.name=="branch naming") | .id')"
   if [[ -z "${id}" ]]; then [[ -n "${why}" ]] || bad "ruleset 'branch naming' missing"; else
     want="refs/heads/${DEFAULT}"; for f in "${PREFIXES[@]}"; do want+=",refs/heads/$f/**"; done
     want="$(tr ',' '\n' <<< "${want}" | sort | paste -sd, -)"
@@ -627,7 +627,7 @@ check() {
     is "branch naming: rules" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.rules[].type] | join(",")')" creation
     is "branch naming: enforcement" "$(gh api "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
   fi
-  id="$(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.name=="main") | .id' 2> /dev/null)"
+  id="$(gh_get "repos/${REPO}/rulesets" --jq '.[] | select(.name=="main") | .id')"
   if [[ -z "${id}" ]]; then [[ -n "${why}" ]] || bad "ruleset 'main' missing"; else
     is "main: targets the default branch" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~DEFAULT_BRANCH"
     is "main: enforcement" "$(gh api "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
