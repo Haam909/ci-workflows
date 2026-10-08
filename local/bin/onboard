@@ -241,12 +241,15 @@ init() {
 
 # ------------------------------------------------- GitHub: what's in effect ----
 
+# gh api prints the error body on stdout too; this prints only a success.
+gh_get() { local o; o="$(gh api "$@" 2> /dev/null)" && printf '%s\n' "$o"; }
+
 # Rule types in effect on the default branch, from every ruleset (repo or org)
 # that applies to it. Empty if none, or if the plan doesn't offer rulesets.
-effective_rules() { gh api "repos/${REPO}/rules/branches/${DEFAULT}" --jq '.[].type' 2> /dev/null | sort -u; }
+effective_rules() { gh_get "repos/${REPO}/rules/branches/${DEFAULT}" --jq '.[].type' | sort -u; }
 
-# Classic branch protection as JSON, or nothing.
-classic_protection() { gh api "repos/${REPO}/branches/${DEFAULT}/protection" 2> /dev/null; }
+# Classic branch protection as JSON, or nothing (404: not protected).
+classic_protection() { gh_get "repos/${REPO}/branches/${DEFAULT}/protection"; }
 
 # Does anything stop a direct push of the onboarding commit?
 push_blocked() {
@@ -260,8 +263,8 @@ push_blocked() {
 # Every check the default branch requires: rulesets plus classic protection.
 required_checks() {
   {
-    gh api "repos/${REPO}/rules/branches/${DEFAULT}" \
-      --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context' 2> /dev/null
+    gh_get "repos/${REPO}/rules/branches/${DEFAULT}" \
+      --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context'
     classic_protection | jq -r '.required_status_checks.checks[]?.context // empty' 2> /dev/null
   } | sort -u
 }
@@ -640,7 +643,7 @@ check() {
     [[ -z "$f" ]] && continue
     printf '%s\n' "${CHECKS[@]}" | grep -qxF "$f" || warn "required check '$f' isn't posted by ci-workflows: every PR waits on it until something else reports it"
   done <<< "${req}"
-  if [[ "$(gh api "repos/${REPO}/rules/branches/${DEFAULT}" --jq '[.[] | select(.type=="required_status_checks") | .parameters.strict_required_status_checks_policy] | any' 2> /dev/null)" == true ]] \
+  if [[ "$(gh_get "repos/${REPO}/rules/branches/${DEFAULT}" --jq '[.[] | select(.type=="required_status_checks") | .parameters.strict_required_status_checks_policy] | any')" == true ]] \
      || classic_protection | jq -e '.required_status_checks.strict' > /dev/null 2>&1; then
     ok "branches must be up to date before merging"
   elif [[ -n "${why}" ]]; then
