@@ -191,7 +191,8 @@ crlf_clone_runs_gate() {
   local f bad=0
   for f in bin/ci bin/signoff .githooks/pre-push; do grep -q $'\r' "$d/$f" && { fail "$f has CRLF in an autocrlf clone"; bad=1; }; done
   [[ "${bad}" == 0 ]] && pass "gate files are LF in an autocrlf=true clone"
-  (cd "$d" && logged bash bin/ci --quick) && pass "bin/ci --quick runs in the autocrlf clone" || fail "bin/ci --quick failed in the autocrlf clone"
+  # A fresh clone has no node_modules: install first, as a developer would.
+  (cd "$d" && logged bash bin/ci --install --quick) && pass "bin/ci --install --quick runs in the autocrlf clone" || fail "bin/ci --install --quick failed in the autocrlf clone"
 }
 
 # ------------------------------------------------------------ developer ----
