@@ -45,9 +45,14 @@ reset_repo() {
   for id in $(gh pr list -R "${REPO}" --state open --json number --jq '.[].number'); do gh pr close -R "${REPO}" "${id}" > /dev/null; done
   gh api -X PATCH "repos/${REPO}" -F allow_squash_merge=true -F allow_rebase_merge=true -F allow_merge_commit=true \
     -F delete_branch_on_merge=false > /dev/null
-  if [[ "$(gh api "repos/${REPO}" --jq .visibility)" != public ]]; then
-    gh repo edit "${REPO}" --visibility public --accept-visibility-change-consequences > /dev/null
-  fi
+  [[ "$(gh api "repos/${REPO}" --jq .visibility)" == public ]] || set_visibility public
+}
+
+# GitHub refuses git access for a while after a visibility change ("Your
+# repository is disabled", or a 403); wait until git can reach it again.
+set_visibility() {       # public | private
+  gh repo edit "${REPO}" --visibility "$1" --accept-visibility-change-consequences > /dev/null
+  wait_for 300 "git access after making ${REPO} $1" git ls-remote --heads "https://github.com/${REPO}.git"
 }
 
 assemble_seed() {        # dir
@@ -77,9 +82,7 @@ push_seed() {
   for b in $(gh api "repos/${REPO}/branches?per_page=100" --jq '.[].name'); do
     [[ "$b" == "${BRANCH}" ]] || gh api -X DELETE "repos/${REPO}/git/refs/heads/${b}" > /dev/null
   done
-  if [[ "${VIS}" == private ]]; then
-    gh repo edit "${REPO}" --visibility private --accept-visibility-change-consequences > /dev/null
-  fi
+  [[ "${VIS}" != private ]] || set_visibility private || return 1
   local m args=(-F allow_squash_merge=false -F allow_rebase_merge=false -F allow_merge_commit=false)
   for m in ${MERGES}; do
     case "$m" in squash) args[1]=allow_squash_merge=true ;; rebase) args[3]=allow_rebase_merge=true ;; merge) args[5]=allow_merge_commit=true ;; esac
