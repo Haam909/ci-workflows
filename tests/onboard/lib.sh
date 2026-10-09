@@ -18,9 +18,10 @@ last_out() { sed 's/\x1b\[[0-9;]*m//g' "${WORK_ROW}/last.out"; }
 # A step that talks to GitHub: logged, and tried again after a bad moment.
 retried() { local try; for try in 1 2 3; do logged "$@" && return 0; transient_out || return 1; (( try < 3 )) && sleep 20; done; return 1; }
 # Did the last step fail on GitHub or the network rather than on what it tested?
-transient_out() {
-  last_out | grep -qiE 'HTTP 5[0-9]{2}|5[0-9]{2} (Bad Gateway|Service Unavailable|Gateway Time)|timed out|timeout|Could not resolve|Connection (reset|refused)|unable to access|repository is disabled|RPC failed|rate limit|TLS handshake|Sigstore verifier|ECONNRESET|ETIMEDOUT|couldn.t read .* from GitHub|can.t read .* from GitHub|can.t fetch'
+is_transient() {
+  grep -qiE 'HTTP 5[0-9]{2}|5[0-9]{2} (Bad Gateway|Service Unavailable|Gateway Time)|timed out|timeout|Could not resolve|Connection (reset|refused)|unable to access|repository is disabled|RPC failed|rate limit|TLS handshake|Sigstore verifier|ECONNRESET|ETIMEDOUT|couldn.t read .* from GitHub|can.t read .* from GitHub|can.t fetch'
 }
+transient_out() { last_out | is_transient; }
 # fail, or infra when the last step failed on GitHub or the network.
 fail_step() { if transient_out; then infra "$*"; else fail "$*"; fi; }
 # The row's outcome as its subshell's exit status: 0 PASS, 1 FAIL, 3 INFRA.
@@ -280,13 +281,21 @@ stopped_as_expected() {
 # couldn't make after retrying.
 onboard_failed() {
   local problems; problems="$(last_out | grep -E '✗|^can.t ')"
-  if [[ -n "${problems}" ]] && ! grep -qvE "couldn.t (read|list)|can.t (read|fetch)" <<< "${problems}"; then infra "$*"; else fail "$*"; fi
+  if [[ -n "${problems}" ]]; then
+    if grep -qvE "couldn.t (read|list)|can.t (read|fetch)" <<< "${problems}"; then fail "$*"; else infra "$*"; fi
+  # It stopped without a list of problems: on GitHub if that's what its last words say.
+  elif last_out | tail -5 | is_transient; then infra "$*"
+  else fail "$*"; fi
 }
 
 onboard_pr() { gh pr list -R "${REPO}" --head chore/onboard-ci --state open --json number --jq '.[0].number // empty'; }
 
 checks_settled() {       # pr — the gate's three checks have all reported, none pending
-  local s
+  local s head name
+  # Right after a push the PR can still point at the commit before it, whose
+  # checks are done: wait until it points at what origin has.
+  read -r head name <<< "$(gh pr view "$1" -R "${REPO}" --json headRefOid,headRefName --jq '"\(.headRefOid) \(.headRefName)"' 2> /dev/null)"
+  [[ -n "${head}" && "${head}" == "$(git ls-remote origin "refs/heads/${name}" 2> /dev/null | cut -f1)" ]] || return 1
   s="$(gh pr checks "$1" -R "${REPO}" --json name,state 2> /dev/null)" || [[ -n "$s" ]] || return 1
   jq -e '(["ci / gate", "ci / branch-name", "local/ci"] - [.[].name] | length == 0)
          and all(.[]; .state != "PENDING" and .state != "QUEUED" and .state != "IN_PROGRESS")' <<< "$s" > /dev/null
@@ -369,9 +378,13 @@ feature_pr() {
   local method
   for method in squash rebase merge; do [[ " ${MERGES} " == *" ${method} "* ]] && break; done
   logged gh pr merge "${pr}" -R "${REPO}" "--${method}" --delete-branch || { fail_step "merging feature PR failed: $(last_out | tail -1)"; return 1; }
+  # Release the merge itself: right after merging, origin can still show the
+  # branch without it.
+  wait_for 120 "PR #${pr}'s merge commit" bash -c "[[ -n \"\$(gh pr view ${pr} -R '${REPO}' --json mergeCommit --jq '.mergeCommit.oid // empty')\" ]]" || return 1
+  RELEASE_SHA="$(gh pr view "${pr}" -R "${REPO}" --json mergeCommit --jq .mergeCommit.oid)"
+  wait_for 120 "${RELEASE_SHA:0:7} on origin/${BRANCH}" bash -c "git fetch -q origin '${BRANCH}' && git merge-base --is-ancestor '${RELEASE_SHA}' 'origin/${BRANCH}'" || return 1
   git switch -q "${BRANCH}" && git pull -q --ff-only
-  RELEASE_SHA="$(git rev-parse HEAD)"
-  pass "feature PR merged by ${method}: $(git log --oneline -1)"
+  pass "feature PR merged by ${method}: $(git log --oneline -1 "${RELEASE_SHA}")"
 }
 
 # ------------------------------------------------------------ release ----
