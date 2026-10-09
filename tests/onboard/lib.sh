@@ -555,7 +555,9 @@ check_assets() {
         case "${rt}" in
           dotnet) pid="$(grep -o '<PackageId>[^<]*' "$(yq ".components[] | select(.name==\"${n}\") | .project" .github/components.yml)" | sed 's/.*>//')"; art="${pid}.${v}.nupkg" ;;
           node)   art="$(jq -r '.name' "$(yq ".components[] | select(.name==\"${n}\") | (.path // \".\")" .github/components.yml)/package.json" | sed 's/^@//; s#/#-#')-${v}.tgz" ;;
-          python) art="$(cd "$d" && printf '%s\n' *.whl | grep -iE "^$(grep -o '^name = "[^"]*' "$(yq ".components[] | select(.name==\"${n}\") | (.path // \".\")" .github/components.yml)/pyproject.toml" | sed 's/.*"//; s/-/_/g')-${v}-")" ;;
+          # The wheel's name comes from pyproject.toml, read here in the clone before looking in $d.
+          python) pid="$(grep -o '^name = "[^"]*' "$(yq ".components[] | select(.name==\"${n}\") | (.path // \".\")" .github/components.yml)/pyproject.toml" | sed 's/.*"//; s/-/_/g')"
+                  art="$(cd "$d" && printf '%s\n' *.whl | grep -iE "^${pid}-${v}-")" ;;
         esac ;;
       *) art="${n}-${v}.zip" ;;
     esac
