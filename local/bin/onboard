@@ -83,13 +83,20 @@ GITHUB_ACTIONS_APP=15368   # the GitHub Actions app on github.com
 default_branch() {
   local b
   b="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2> /dev/null)"; b="${b#origin/}"
+  local try
   if [[ -z "$b" ]] && command -v gh > /dev/null; then
-    b="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2> /dev/null)"
+    for try in 1 2 3; do
+      b="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2> /dev/null)" && break
+      (( try < 3 )) && sleep $(( try * 5 ))
+    done
+    # Guessing would apply or check the wrong branch; only init, which
+    # changes nothing on GitHub, takes the current one.
+    [[ -n "$b" || "${CMD}" == init ]] || die "can't read the default branch from GitHub; check your connection, or run: git remote set-head origin --auto"
   fi
   [[ -n "$b" ]] || b="$(git branch --show-current)"
   echo "$b"
 }
-DEFAULT="$(default_branch)"
+DEFAULT="$(default_branch)" || exit 1
 [[ -n "${DEFAULT}" ]] || die "can't tell the default branch; run: git remote set-head origin --auto"
 
 # A trigger as this repo should have it: its default branch, the chosen ref.
@@ -268,13 +275,16 @@ gh_read() {
   return 2
 }
 
+# The last read's refusal was the plan or visibility, not a bad moment.
+refused_by_plan() { grep -qiE '"message":"[^"]*(upgrade|plan|not available)' "${GH_BODYF}"; }
+
 # A read where "not there" and "can't read" both mean "nothing": the output
 # or nothing, and an error other than 404 is said on stderr.
 gh_get() {
   gh_read "$@"; local rc=$?
   # A plan or visibility refusal is an answer, not a failed read; check says
   # what the plan doesn't offer.
-  if [[ ${rc} == 2 ]] && ! grep -qiE '"message":"[^"]*(upgrade|plan|not available)' "${GH_BODYF}"; then
+  if [[ ${rc} == 2 ]] && ! refused_by_plan; then
     warn "couldn't read $1 from GitHub: $(gh_err)" >&2
     printf '%s: %s\n' "$1" "$(gh_err)" >> "${GH_FAILF}"
   fi
@@ -292,9 +302,11 @@ classic_protection() { gh_get "repos/${REPO}/branches/${DEFAULT}/protection"; }
 
 # Does anything stop a direct push of the onboarding commit?
 push_blocked() {
+  : > "${GH_FAILF}"
   local rules; rules="$(effective_rules)"
-  grep -qxE 'pull_request|required_status_checks|update|non_fast_forward_disabled' <<< "${rules}" && return 0
   local cp; cp="$(classic_protection)"
+  [[ -s "${GH_FAILF}" ]] && die "can't read the branch protection on ${DEFAULT} from GitHub ($(head -1 "${GH_FAILF}")); re-run apply"
+  grep -qxE 'pull_request|required_status_checks|update|non_fast_forward_disabled' <<< "${rules}" && return 0
   [[ -n "${cp}" ]] && jq -e '.required_pull_request_reviews or .required_status_checks or .restrictions' <<< "${cp}" > /dev/null 2>&1 && return 0
   return 1
 }
@@ -360,9 +372,13 @@ reviewers_json() {
 
 ensure_environment() {     # name [reviewers-json]
   local env="$1" rv="${2:-}"
-  if gh_read "repos/${REPO}/environments/${env}" > /dev/null; then
-    skip "environment ${env} exists; left alone"
-  elif [[ -n "${rv}" ]]; then
+  gh_read "repos/${REPO}/environments/${env}" > /dev/null
+  case $? in
+    0) skip "environment ${env} exists; left alone"; return 0 ;;
+    # Creating is a PUT, which would overwrite one that is there.
+    2) die "can't read environment ${env} from GitHub: $(gh_err)" ;;
+  esac
+  if [[ -n "${rv}" ]]; then
     gh_create "environment ${env}, reviewers ${REVIEWERS[*]}" PUT "repos/${REPO}/environments/${env}" "{\"reviewers\":${rv}}"
   else
     gh_create "environment ${env}" PUT "repos/${REPO}/environments/${env}"
@@ -372,7 +388,9 @@ ensure_environment() {     # name [reviewers-json]
 ensure_ruleset() {         # name json
   local have try
   for try in 1 2 3; do
-    have="$(gh_get "repos/${REPO}/rulesets" --jq ".[] | select(.name==\"$1\") | .id")"
+    # Not knowing what's there, a POST could make a second one.
+    have="$(gh_read "repos/${REPO}/rulesets" --jq ".[] | select(.name==\"$1\") | .id")"
+    [[ $? == 2 ]] && ! refused_by_plan && die "can't read the rulesets from GitHub: $(gh_err)"
     if [[ -n "${have}" ]]; then
       [[ ${try} == 1 ]] && skip "ruleset '$1' exists; left alone" || done_ "ruleset '$1'"
       return 0
@@ -387,7 +405,7 @@ ensure_ruleset() {         # name json
 # What a PR's merge is waiting for, in words.
 pr_blockers() {            # pr
   local v req c st
-  v="$(gh pr view "$1" --json reviewDecision,statusCheckRollup)"
+  v="$(retry gh pr view "$1" --json reviewDecision,statusCheckRollup)" || die "can't read PR #$1 from GitHub (the error is above)"
   case "$(jq -r '.reviewDecision // ""' <<< "$v")" in
     REVIEW_REQUIRED)   echo "an approving review (the branch rules require one)" ;;
     CHANGES_REQUESTED) echo "a reviewer requested changes" ;;
@@ -406,7 +424,7 @@ pr_blockers() {            # pr
 # Bring the onboarding branch up to date the way a developer would: rebase,
 # then push, which runs bin/ci and signs off the new commit (pre-push).
 update_onboarding_branch() {
-  git fetch --quiet origin "${DEFAULT}" "${ONBOARD_BRANCH}" || die "can't fetch origin"
+  retry git fetch --quiet origin "${DEFAULT}" "${ONBOARD_BRANCH}" || die "can't fetch origin"
   git switch --quiet -C "${ONBOARD_BRANCH}" "origin/${ONBOARD_BRANCH}" || die "can't check out ${ONBOARD_BRANCH}"
   git rebase --quiet "origin/${DEFAULT}" || { git rebase --abort; git switch --quiet "${DEFAULT}"; die "${ONBOARD_BRANCH} conflicts with ${DEFAULT}; resolve it by hand (git rebase origin/${DEFAULT} on that branch)"; }
   git push --quiet --force-with-lease origin "${ONBOARD_BRANCH}" || { git switch --quiet "${DEFAULT}"; die "pushing the rebased ${ONBOARD_BRANCH} failed"; }
@@ -423,7 +441,7 @@ handle_onboarding_pr() {   # pr
   say "onboarding PR #${pr}"
   # GitHub computes mergeability in the background; UNKNOWN means not yet.
   for i in 1 2 3 4 5 6; do
-    st="$(gh pr view "${pr}" --json mergeStateStatus --jq .mergeStateStatus)"
+    st="$(retry gh pr view "${pr}" --json mergeStateStatus --jq .mergeStateStatus)" || die "can't read PR #${pr} from GitHub (the error is above)"
     [[ "${st}" != UNKNOWN ]] && break
     sleep 5
   done
@@ -435,7 +453,7 @@ handle_onboarding_pr() {   # pr
     DIRTY)
       die "PR #${pr} conflicts with ${DEFAULT}. Rebase ${ONBOARD_BRANCH} onto origin/${DEFAULT}, fix the conflicts, push, then re-run apply." ;;
     BLOCKED)
-      local why; why="$(pr_blockers "${pr}")"
+      local why; why="$(pr_blockers "${pr}")" || exit 1
       if grep -qiE 'PENDING|IN_PROGRESS|QUEUED|EXPECTED' <<< "${why}" && ! grep -q 'review' <<< "${why}"; then
         die "PR #${pr}: checks still running. Re-run apply when they finish (gh pr checks ${pr} --watch).$(printf '\n  %s' "${why}")"
       fi
@@ -455,7 +473,16 @@ handle_onboarding_pr() {   # pr
   else
     gh pr merge "${pr}" "--${method}" --delete-branch --subject "${subject}" --body "" > /dev/null || die "merging PR #${pr} failed"
   fi
-  git switch --quiet "${DEFAULT}" && git pull --quiet --ff-only origin "${DEFAULT}" || die "can't update ${DEFAULT} after the merge"
+  # Right after a merge, origin can still show ${DEFAULT} without it, and the
+  # starting tag would go on the commit before.
+  local merged="" try
+  for try in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    merged="$(gh pr view "${pr}" --json mergeCommit --jq '.mergeCommit.oid // empty' 2> /dev/null)"
+    [[ -n "${merged}" ]] && git fetch --quiet origin "${DEFAULT}" && git merge-base --is-ancestor "${merged}" "origin/${DEFAULT}" && break
+    merged=""; sleep 5
+  done
+  [[ -n "${merged}" ]] || die "PR #${pr} is merged, but origin/${DEFAULT} doesn't show it yet. Run git pull on ${DEFAULT}, then re-run apply."
+  git switch --quiet "${DEFAULT}" && git merge --quiet --ff-only "origin/${DEFAULT}" || die "can't update ${DEFAULT} after the merge"
   done_ "merged by ${method}: $(git log --oneline -1)"
 }
 
@@ -463,9 +490,9 @@ handle_onboarding_pr() {   # pr
 # it to the onboarding branch and open a PR.
 open_onboarding_pr() {
   local pr remote_has
-  remote_has="$(git ls-remote --heads origin "${ONBOARD_BRANCH}")"
+  remote_has="$(retry git ls-remote --heads origin "${ONBOARD_BRANCH}")" || die "can't list origin's branches"
   if [[ -n "${remote_has}" ]]; then
-    git fetch --quiet origin "${ONBOARD_BRANCH}"
+    retry git fetch --quiet origin "${ONBOARD_BRANCH}" || die "can't fetch origin"
     if git diff --quiet HEAD "origin/${ONBOARD_BRANCH}" -- 2> /dev/null; then
       skip "${ONBOARD_BRANCH} already on origin with these files; reusing it"
       git reset --quiet --hard "origin/${DEFAULT}"
@@ -492,12 +519,13 @@ open_onboarding_pr() {
 apply() {
   local b pr
   # A later run on a protected branch: deal with the onboarding PR first.
-  pr="$(gh pr list --head "${ONBOARD_BRANCH}" --base "${DEFAULT}" --state open --json number --jq '.[0].number // empty')"
+  pr="$(retry gh pr list --head "${ONBOARD_BRANCH}" --base "${DEFAULT}" --state open --json number --jq '.[0].number // empty')" \
+    || die "can't list the open PRs from GitHub (the error is above)"
   [[ -n "${pr}" ]] && handle_onboarding_pr "${pr}"
 
   say "branch"
   [[ "$(git branch --show-current)" == "${DEFAULT}" ]] || die "switch to ${DEFAULT} first"
-  git fetch --quiet origin "${DEFAULT}" --tags || die "can't fetch origin"
+  retry git fetch --quiet origin "${DEFAULT}" --tags || die "can't fetch origin"
   [[ "$(git rev-parse HEAD)" == "$(git rev-parse "origin/${DEFAULT}")" ]] || die "${DEFAULT} isn't at origin/${DEFAULT}; pull or push first"
   done_ "on ${DEFAULT} at origin/${DEFAULT}"
   # The main ruleset requires linear history, which a merge commit breaks: with
@@ -510,8 +538,12 @@ apply() {
 
   # An earlier run opened a PR that was closed unmerged, and the files are no
   # longer in this checkout: take them from the branch it left on origin.
-  if [[ ! -f "${MANIFEST}" ]] && git ls-remote --exit-code --heads origin "${ONBOARD_BRANCH}" > /dev/null; then
-    git fetch --quiet origin "${ONBOARD_BRANCH}"
+  local earlier=""
+  if [[ ! -f "${MANIFEST}" ]]; then
+    earlier="$(retry git ls-remote --heads origin "${ONBOARD_BRANCH}")" || die "can't list origin's branches"
+  fi
+  if [[ -n "${earlier}" ]]; then
+    retry git fetch --quiet origin "${ONBOARD_BRANCH}" || die "can't fetch origin"
     if git cat-file -e "origin/${ONBOARD_BRANCH}:${MANIFEST}" 2> /dev/null; then
       say "earlier onboarding branch"
       done_ "${ONBOARD_BRANCH} is on origin from an earlier run; reopening its PR"
@@ -560,10 +592,14 @@ apply() {
   fi
 
   say "starting tag"
-  if [[ -n "$(git ls-remote --tags origin 'refs/tags/v[0-9]*')" ]]; then
+  local tags; tags="$(retry git ls-remote --tags origin 'refs/tags/v[0-9]*')" || die "can't list origin's tags"
+  if [[ -n "${tags}" ]]; then
     skip "a v* tag exists; versions continue from it"
   else
-    git tag -a v0.1.0 -m "starting point" && git push --quiet --no-verify origin v0.1.0 && done_ "v0.1.0 at $(git rev-parse --short HEAD)"
+    # -f: a run whose push failed left the tag here, maybe on another commit.
+    git tag -f -a v0.1.0 -m "starting point" > /dev/null || die "can't tag v0.1.0"
+    retry git push --quiet --no-verify origin v0.1.0 || die "pushing v0.1.0 failed (see git's message above); re-run apply"
+    done_ "v0.1.0 at $(git rev-parse --short HEAD)"
   fi
 
   say "environments"
@@ -644,7 +680,10 @@ check() {
   case "${got}" in
     "true all") ok "Actions enabled, all actions allowed" ;;
     "true selected")
-      if gh_get "repos/${REPO}/actions/permissions/selected-actions" --jq '.patterns_allowed[]' | grep -qE '^Haam909/ci-workflows(/\*|@\*|/\*@\*)?$|^Haam909/\*$'; then
+      local allowed; allowed="$(gh_read "repos/${REPO}/actions/permissions/selected-actions" --jq '.patterns_allowed[]')"
+      if [[ $? == 2 ]]; then
+        bad "couldn't read the Actions allow-list from GitHub: $(gh_err)"
+      elif grep -qE '^Haam909/ci-workflows(/\*|@\*|/\*@\*)?$|^Haam909/\*$' <<< "${allowed}"; then
         ok "Actions enabled; Haam909/ci-workflows is on the allow-list"
       else
         bad "Actions allow-list doesn't include Haam909/ci-workflows/*: every workflow would fail to start"
