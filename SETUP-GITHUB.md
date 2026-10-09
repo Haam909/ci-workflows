@@ -464,6 +464,12 @@ The token wasn't allowed to do something. Check the trigger file's
 `permissions:` block matches the one in `examples/`, and that it has
 `secrets: inherit`.
 
+**"Can't list the PRs merged as …" in the version step**
+The trigger doesn't grant `pull-requests: read`. A public repo's PRs can be
+read without it; a private or internal repo's can't, and the version bump
+comes from the merged PRs' branches. Add it to the trigger's `permissions:`
+block, as in `examples/`. `onboard check` reports it.
+
 **"No successful deployment to test found"**
 You ran Release with **sha** blank before ever merging to main. Merge
 something first, or pass the commit you want in **sha**.

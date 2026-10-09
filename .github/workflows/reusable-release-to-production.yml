@@ -46,13 +46,10 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-  actions: read
-  id-token: write
-  attestations: write
-  deployments: write
-  packages: write
+# No permissions block: the token is whatever the trigger grants. Declaring a
+# permission here that an existing trigger doesn't grant would stop that
+# repo's runs at startup, so new ones (pull-requests: read) are added to the
+# triggers in examples/ only.
 
 jobs:
   resolve:

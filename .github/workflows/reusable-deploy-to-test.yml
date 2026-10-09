@@ -32,11 +32,10 @@ on:
         type: string
         default: '3.12'
 
-permissions:
-  contents: read
-  id-token: write
-  deployments: write
-  packages: write
+# No permissions block: the token is whatever the trigger grants. Declaring a
+# permission here that an existing trigger doesn't grant would stop that
+# repo's runs at startup, so new ones (pull-requests: read) are added to the
+# triggers in examples/ only.
 
 jobs:
   discover:
