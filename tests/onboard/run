@@ -30,6 +30,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CIW_UNDER_TEST="${CIW_UNDER_TEST:-$(cd "${HERE}/../.." && pwd)}"
 CIW_REF="${CIW_REF:-v1}"
 OWNER="${OWNER:-$(gh api user --jq .login)}"
+[[ -n "${OWNER}" ]] || { echo "can't read the gh user; set OWNER, or check gh auth status" >&2; exit 2; }
 ONBOARD="${CIW_UNDER_TEST}/local/bin/onboard"
 WORK="${WORK:-${TMPDIR:-${TEMP:-/tmp}}/ciw-onboard}"     # clones and logs, per row
 RESULTS="${RESULTS:-${HERE}/results}"
