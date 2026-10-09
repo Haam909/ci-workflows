@@ -337,16 +337,21 @@ gh_create() {              # what method path [json]
 }
 
 reviewers_json() {
-  local r kind who id out=""
-  [[ ${#REVIEWERS[@]} -gt 0 ]] || REVIEWERS=("$(gh api user --jq .login)")
+  local r kind who id me out=""
+  if [[ ${#REVIEWERS[@]} -eq 0 ]]; then
+    me="$(gh_read user --jq .login)" || die "can't read your GitHub login: $(gh_err)"
+    REVIEWERS=("${me}")
+  fi
   [[ ${#REVIEWERS[@]} -le 6 ]] || die "GitHub allows at most 6 required reviewers per environment"
   for r in "${REVIEWERS[@]}"; do
     case "$r" in team:*) kind=Team; who="${r#team:}" ;; user:*) kind=User; who="${r#user:}" ;; *) kind=User; who="$r" ;; esac
     if [[ "${kind}" == Team ]]; then
       [[ "${who}" == */* ]] || die "--reviewer team:ORG/SLUG, got ${r}"
-      id="$(gh api "orgs/${who%%/*}/teams/${who#*/}" --jq .id 2> /dev/null)" || die "no team ${who} (or no access to it)"
+      id="$(gh_read "orgs/${who%%/*}/teams/${who#*/}" --jq .id)"
+      case $? in 1) die "no team ${who} (or no access to it)" ;; 2) die "can't read team ${who} from GitHub: $(gh_err)" ;; esac
     else
-      id="$(gh api "users/${who}" --jq .id 2> /dev/null)" || die "no GitHub user ${who}"
+      id="$(gh_read "users/${who}" --jq .id)"
+      case $? in 1) die "no GitHub user ${who}" ;; 2) die "can't read GitHub user ${who}: $(gh_err)" ;; esac
     fi
     out+="{\"type\":\"${kind}\",\"id\":${id}},"
   done
@@ -562,7 +567,7 @@ apply() {
   fi
 
   say "environments"
-  local rv; rv="$(reviewers_json)"
+  local rv; rv="$(reviewers_json)" || exit 1
   ensure_environment test
   ensure_environment release "${rv}"
   ensure_environment production
