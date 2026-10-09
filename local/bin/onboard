@@ -241,8 +241,42 @@ init() {
 
 # ------------------------------------------------- GitHub: what's in effect ----
 
-# gh api prints the error body on stdout too; this prints only a success.
-gh_get() { local o; o="$(gh api "$@" 2> /dev/null)" && printf '%s\n' "$o"; }
+# GitHub has bad moments (5xx, rate limits, no answer). A read retries those,
+# and tells "not there" (404) from "couldn't ask", so a bad moment is never
+# reported as something missing.
+GH_ERRF="$(mktemp)"; GH_BODYF="$(mktemp)"; trap 'rm -f "${GH_ERRF}" "${GH_BODYF}"' EXIT
+gh_err() { head -1 "${GH_ERRF}"; }
+
+transient() {              # stderr-file body-file
+  local code; code="$(grep -o '(HTTP [0-9]*)' "$1" | grep -o '[0-9]*' | head -1)"
+  [[ -z "${code}" || "${code}" == 5* || "${code}" == 429 ]] && return 0
+  cat "$1" "$2" | grep -qi 'rate limit'
+}
+
+# Prints the output: 0. Not found: 1. Any other error, after retries: 2, and
+# gh_err says what. gh prints an error's body on stdout; that is kept in
+# GH_BODYF, never printed as output.
+gh_read() {
+  local out try
+  for try in 1 2 3 4; do
+    if out="$(gh api "$@" 2> "${GH_ERRF}")"; then printf '%s\n' "${out}"; return 0; fi
+    printf '%s\n' "${out}" > "${GH_BODYF}"
+    grep -q '(HTTP 404)' "${GH_ERRF}" && return 1
+    transient "${GH_ERRF}" "${GH_BODYF}" || return 2
+    (( try < 4 )) && sleep $(( try * 5 ))
+  done
+  return 2
+}
+
+# A read where "not there" and "can't read" both mean "nothing": the output
+# or nothing, and an error other than 404 is said on stderr.
+gh_get() {
+  gh_read "$@"; local rc=$?
+  [[ ${rc} == 2 ]] && warn "couldn't read $1 from GitHub: $(gh_err)" >&2
+  return ${rc}
+}
+
+retry() { local try; for try in 1 2 3; do "$@" && return 0; (( try < 3 )) && sleep $(( try * 5 )); done; return 1; }
 
 # Rule types in effect on the default branch, from every ruleset (repo or org)
 # that applies to it. Empty if none, or if the plan doesn't offer rulesets.
@@ -272,7 +306,8 @@ required_checks() {
 # The first merge method the repo allows, in the order that keeps history
 # linear and one commit per PR.
 merge_method() {
-  local s; s="$(gh api "repos/${REPO}" --jq '"\(.allow_squash_merge) \(.allow_rebase_merge) \(.allow_merge_commit)"')"
+  local s; s="$(gh_read "repos/${REPO}" --jq '"\(.allow_squash_merge) \(.allow_rebase_merge) \(.allow_merge_commit)"')" \
+    || die "can't read ${REPO}'s merge settings from GitHub: $(gh_err)"
   read -r sq rb mc <<< "$s"
   if [[ "${sq}" == true ]]; then echo squash
   elif [[ "${rb}" == true ]]; then echo rebase
@@ -284,11 +319,15 @@ merge_method() {
 
 # Create, or report why the plan or settings won't allow it. Never overwrites.
 gh_create() {              # what method path [json]
-  local what="$1" method="$2" path="$3" body="${4:-}" out
-  if [[ -n "${body}" ]]; then out="$(gh api -X "${method}" "${path}" --input - <<< "${body}" 2>&1 > /dev/null)"
-  else out="$(gh api -X "${method}" "${path}" 2>&1 > /dev/null)"; fi
-  if [[ $? -eq 0 ]]; then done_ "${what}"; return 0; fi
-  warn "${what}: GitHub refused it: $(grep -o '"message":"[^"]*' <<< "${out}" | head -1 | sed 's/"message":"//' || true)${out:+ }$(grep -v '^{' <<< "${out}" | head -1)"
+  local what="$1" method="$2" path="$3" body="${4:-}" try
+  # A PUT is safe to repeat; a POST that failed in a bad moment may have
+  # landed, so its caller checks before trying again.
+  for try in 1 2 3 4; do
+    if gh api -X "${method}" "${path}" --input - <<< "${body:-{\}}" > "${GH_BODYF}" 2> "${GH_ERRF}"; then done_ "${what}"; return 0; fi
+    [[ "${method}" == PUT ]] && transient "${GH_ERRF}" "${GH_BODYF}" && (( try < 4 )) || break
+    sleep $(( try * 5 ))
+  done
+  warn "${what}: GitHub refused it: $(grep -o '"message":"[^"]*' "${GH_BODYF}" | head -1 | sed 's/"message":"//' || true) $(gh_err)"
   return 1
 }
 
@@ -311,7 +350,7 @@ reviewers_json() {
 
 ensure_environment() {     # name [reviewers-json]
   local env="$1" rv="${2:-}"
-  if gh api "repos/${REPO}/environments/${env}" > /dev/null 2>&1; then
+  if gh_read "repos/${REPO}/environments/${env}" > /dev/null; then
     skip "environment ${env} exists; left alone"
   elif [[ -n "${rv}" ]]; then
     gh_create "environment ${env}, reviewers ${REVIEWERS[*]}" PUT "repos/${REPO}/environments/${env}" "{\"reviewers\":${rv}}"
@@ -321,10 +360,18 @@ ensure_environment() {     # name [reviewers-json]
 }
 
 ensure_ruleset() {         # name json
-  local have
-  have="$(gh_get "repos/${REPO}/rulesets" --jq ".[] | select(.name==\"$1\") | .id")"
-  if [[ -n "${have}" ]]; then skip "ruleset '$1' exists; left alone"
-  else gh_create "ruleset '$1'" POST "repos/${REPO}/rulesets" "$2"; fi
+  local have try
+  for try in 1 2 3; do
+    have="$(gh_get "repos/${REPO}/rulesets" --jq ".[] | select(.name==\"$1\") | .id")"
+    if [[ -n "${have}" ]]; then
+      [[ ${try} == 1 ]] && skip "ruleset '$1' exists; left alone" || done_ "ruleset '$1'"
+      return 0
+    fi
+    gh_create "ruleset '$1'" POST "repos/${REPO}/rulesets" "$2" && return 0
+    transient "${GH_ERRF}" "${GH_BODYF}" || return 1
+    sleep $(( try * 5 ))
+  done
+  return 1
 }
 
 # What a PR's merge is waiting for, in words.
@@ -390,7 +437,7 @@ handle_onboarding_pr() {   # pr
     *) die "PR #${pr} can't be merged yet (${st}). See it with: gh pr view ${pr} --web" ;;
   esac
 
-  method="$(merge_method)"
+  method="$(merge_method)" || exit 1
   [[ -n "${method}" ]] || die "the repo allows no merge method (Settings → General → Pull Requests)"
   subject="${ONBOARD_SUBJECT} (#${pr})"
   if [[ "${method}" == rebase ]]; then
@@ -445,7 +492,8 @@ apply() {
   done_ "on ${DEFAULT} at origin/${DEFAULT}"
   # The main ruleset requires linear history, which a merge commit breaks: with
   # only merge commits allowed, no PR could ever merge once it exists.
-  case "$(merge_method)" in
+  local allowed; allowed="$(merge_method)" || exit 1
+  case "${allowed}" in
     "")    die "the repo allows no merge method. Allow squash or rebase merging (Settings → General → Pull Requests), then re-run." ;;
     merge) die "the repo allows only merge commits, and the main ruleset requires linear history, so no PR could merge. Allow squash or rebase merging (Settings → General → Pull Requests), then re-run." ;;
   esac
@@ -543,15 +591,15 @@ is()  { [[ "$2" == "$3" ]] && ok "$1" || bad "$1: got '${2}', want '${3}'"; }
 
 # GitHub's reason for refusing a read, if it's the plan or visibility.
 plan_refusal() {           # path
-  # gh api prints the error body, with its "message", on stdout.
-  local out; out="$(gh api "$1" 2> /dev/null)" && return 1
-  grep -oiE '"message":"[^"]*(upgrade|plan|not available)[^"]*' <<< "${out}" | sed 's/"message":"//' | head -1
+  gh_read "$1" > /dev/null && return 1
+  grep -oiE '"message":"[^"]*(upgrade|plan|not available)[^"]*' "${GH_BODYF}" | sed 's/"message":"//' | head -1
 }
 
 check() {
   local f mode want got id info vis owner_type why
-  git fetch --quiet origin "${DEFAULT}" --tags 2> /dev/null
-  info="$(gh api "repos/${REPO}" --jq '"\(.visibility) \(.owner.type) \(.allow_squash_merge) \(.allow_rebase_merge) \(.allow_merge_commit)"')"
+  retry git fetch --quiet origin "${DEFAULT}" --tags 2> /dev/null || die "can't fetch ${DEFAULT} from origin; check your connection and re-run"
+  info="$(gh_read "repos/${REPO}" --jq '"\(.visibility) \(.owner.type) \(.allow_squash_merge) \(.allow_rebase_merge) \(.allow_merge_commit)"')" \
+    || die "can't read ${REPO} from GitHub: $(gh_err)"
   read -r vis owner_type sq rb mc <<< "${info}"
 
   say "files on origin/${DEFAULT}"
@@ -581,15 +629,18 @@ check() {
   is "core.hooksPath" "$(git config core.hooksPath)" .githooks
 
   say "starting tag"
-  got="$(git ls-remote --tags origin 'refs/tags/v[0-9]*' | grep -c -v '\^{}')"
-  [[ "${got}" -gt 0 ]] && ok "${got} v* tag(s)" || bad "no v* tag: every merge would build 0.1.0-alpha.0"
+  if ! got="$(retry git ls-remote --tags origin 'refs/tags/v[0-9]*')"; then bad "couldn't list origin's tags"
+  else
+    got="$(grep -c -v '\^{}' <<< "${got}")"
+    [[ "${got}" -gt 0 ]] && ok "${got} v* tag(s)" || bad "no v* tag: every merge would build 0.1.0-alpha.0"
+  fi
 
   say "actions"
   got="$(gh_get "repos/${REPO}/actions/permissions" --jq '"\(.enabled) \(.allowed_actions)"')"
   case "${got}" in
     "true all") ok "Actions enabled, all actions allowed" ;;
     "true selected")
-      if gh api "repos/${REPO}/actions/permissions/selected-actions" --jq '.patterns_allowed[]' 2> /dev/null | grep -qE '^Haam909/ci-workflows(/\*|@\*|/\*@\*)?$|^Haam909/\*$'; then
+      if gh_get "repos/${REPO}/actions/permissions/selected-actions" --jq '.patterns_allowed[]' | grep -qE '^Haam909/ci-workflows(/\*|@\*|/\*@\*)?$|^Haam909/\*$'; then
         ok "Actions enabled; Haam909/ci-workflows is on the allow-list"
       else
         bad "Actions allow-list doesn't include Haam909/ci-workflows/*: every workflow would fail to start"
@@ -601,15 +652,16 @@ check() {
 
   say "environments"
   for f in test release production; do
-    got="$(gh api "repos/${REPO}/environments/$f" --jq '[.protection_rules[].type] | join(",")' 2> /dev/null)"
-    if [[ $? -ne 0 ]]; then
-      if [[ "${vis}" == private && "${owner_type}" == User ]]; then lim "environment $f missing: GitHub offers environments on private repos only with Pro or Team"
-      else bad "environment $f missing"; fi
-      continue
-    fi
+    got="$(gh_read "repos/${REPO}/environments/$f" --jq '[.protection_rules[].type] | join(",")')"
+    case $? in
+      2) bad "couldn't read environment $f from GitHub: $(gh_err)"; continue ;;
+      1) if [[ "${vis}" == private && "${owner_type}" == User ]]; then lim "environment $f missing: GitHub offers environments on private repos only with Pro or Team"
+         else bad "environment $f missing"; fi
+         continue ;;
+    esac
     if [[ "$f" == release ]]; then
       if [[ "${got}" == *required_reviewers* ]]; then
-        ok "release has required reviewers: $(gh api "repos/${REPO}/environments/release" --jq '[.protection_rules[] | select(.type=="required_reviewers") | .reviewers[] | "\(.type):\(.reviewer.login // .reviewer.slug)"] | join(", ")')"
+        ok "release has required reviewers: $(gh_get "repos/${REPO}/environments/release" --jq '[.protection_rules[] | select(.type=="required_reviewers") | .reviewers[] | "\(.type):\(.reviewer.login // .reviewer.slug)"] | join(", ")')"
       elif [[ "${vis}" == private ]]; then lim "release has no required reviewers; on this plan a private repo can't have them, so releases don't pause for approval"
       else bad "release has no required reviewers"; fi
     else
@@ -627,16 +679,16 @@ check() {
   if [[ -z "${id}" ]]; then [[ -n "${why}" ]] || bad "ruleset 'branch naming' missing"; else
     want="refs/heads/${DEFAULT}"; for f in "${PREFIXES[@]}"; do want+=",refs/heads/$f/**"; done
     want="$(tr ',' '\n' <<< "${want}" | sort | paste -sd, -)"
-    got="$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.conditions.ref_name.exclude[]] | sort | join(",")')"
+    got="$(gh_get "repos/${REPO}/rulesets/${id}" --jq '[.conditions.ref_name.exclude[]] | sort | join(",")')"
     is "branch naming: ${#PREFIXES[@]} prefixes + ${DEFAULT} excluded" "${got}" "${want}"
-    is "branch naming: includes" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~ALL"
-    is "branch naming: rules" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.rules[].type] | join(",")')" creation
-    is "branch naming: enforcement" "$(gh api "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
+    is "branch naming: includes" "$(gh_get "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~ALL"
+    is "branch naming: rules" "$(gh_get "repos/${REPO}/rulesets/${id}" --jq '[.rules[].type] | join(",")')" creation
+    is "branch naming: enforcement" "$(gh_get "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
   fi
   id="$(gh_get "repos/${REPO}/rulesets" --jq '.[] | select(.name=="main") | .id')"
   if [[ -z "${id}" ]]; then [[ -n "${why}" ]] || bad "ruleset 'main' missing"; else
-    is "main: targets the default branch" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~DEFAULT_BRANCH"
-    is "main: enforcement" "$(gh api "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
+    is "main: targets the default branch" "$(gh_get "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~DEFAULT_BRANCH"
+    is "main: enforcement" "$(gh_get "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
   fi
   # What is actually in effect, from every source.
   for f in pull_request required_linear_history required_status_checks; do

@@ -51,10 +51,17 @@ esac
 
 for t in git gh yq jq dotnet node npm python; do command -v "$t" > /dev/null || { echo "$t is required" >&2; exit 2; }; done
 
-FAILED_ROWS=()
+FAILED_ROWS=(); INFRA_ROWS=()
 for row in "${ROWS[@]}"; do
   declare -F "row_${row}" > /dev/null || { echo "no row ${row}" >&2; exit 2; }
-  if run_row "${row}"; then echo "PASS ${row}"; else echo "FAIL ${row}"; FAILED_ROWS+=("${row}"); [[ "${KEEP_GOING:-}" == 1 ]] || break; fi
+  run_row "${row}"
+  case $? in
+    0) echo "PASS ${row}" ;;
+    3) echo "INFRA ${row}"; INFRA_ROWS+=("${row}") ;;     # GitHub or the network; run it again
+    *) echo "FAIL ${row}"; FAILED_ROWS+=("${row}"); [[ "${KEEP_GOING:-}" == 1 ]] || break ;;
+  esac
 done
 
+[[ ${#INFRA_ROWS[@]} -eq 0 ]] || echo "infra (GitHub or the network, not the code; run again): ${INFRA_ROWS[*]}"
 [[ ${#FAILED_ROWS[@]} -eq 0 ]] || { echo "failed: ${FAILED_ROWS[*]}"; exit 1; }
+[[ ${#INFRA_ROWS[@]} -eq 0 ]] || exit 3
