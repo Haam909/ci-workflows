@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# tests/onboard/offline/run — onboard's and the harness's handling of GitHub
+# errors, against a fake gh: no network, no sandboxes, under a minute.
+#
+#   tests/onboard/offline/run
+#
+# Needs: bash, git, jq, yq. Exits non-zero if any case is wrong.
+
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+rc=0
+bash "${HERE}/onboard.sh" || rc=1
+bash "${HERE}/harness.sh" || rc=1
+exit "${rc}"

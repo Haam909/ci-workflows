@@ -287,7 +287,7 @@ dev_setup() {
     case "${rt}" in
       python)
         if [[ -f "$d/requirements.txt" ]]; then retried python -m pip install --quiet -r "$d/requirements.txt"
-        else retried python -m pip install --quiet -e "$d[dev]"; fi ;;
+        else retried python -m pip install --quiet -e "${d}[dev]"; fi ;;
       node) retried npm ci --prefix "$d" --silent --no-audit --no-fund ;;
     esac || fail_step "developer setup: installing ${d} (${rt}) failed"
   done < <(yq '.components[] | .runtime + " " + (.path // ".")' .github/components.yml)
@@ -405,7 +405,6 @@ onboard_repo() {
   git switch -q "${BRANCH}" && retried git pull -q --ff-only || { fail_step "pulling ${BRANCH} failed"; return 1; }
 
   # What onboarding put on the default branch.
-  local skipped; skipped="$(git log -1 --format=%s)"
   note "onboarding commit: $(git log --oneline -1)"
   if [[ -n "${TAGS}" ]]; then
     local tags; tags="$(gh_out git ls-remote --tags origin)" || { fail_step "can't list origin's tags"; return 1; }
@@ -556,7 +555,7 @@ check_assets() {
         case "${rt}" in
           dotnet) pid="$(grep -o '<PackageId>[^<]*' "$(yq ".components[] | select(.name==\"${n}\") | .project" .github/components.yml)" | sed 's/.*>//')"; art="${pid}.${v}.nupkg" ;;
           node)   art="$(jq -r '.name' "$(yq ".components[] | select(.name==\"${n}\") | (.path // \".\")" .github/components.yml)/package.json" | sed 's/^@//; s#/#-#')-${v}.tgz" ;;
-          python) art="$(ls "$d" | grep -E '\.whl$' | grep -iE "^$(grep -o '^name = "[^"]*' "$(yq ".components[] | select(.name==\"${n}\") | (.path // \".\")" .github/components.yml)/pyproject.toml" | sed 's/.*"//; s/-/_/g')-${v}-")" ;;
+          python) art="$(cd "$d" && printf '%s\n' *.whl | grep -iE "^$(grep -o '^name = "[^"]*' "$(yq ".components[] | select(.name==\"${n}\") | (.path // \".\")" .github/components.yml)/pyproject.toml" | sed 's/.*"//; s/-/_/g')-${v}-")" ;;
         esac ;;
       *) art="${n}-${v}.zip" ;;
     esac

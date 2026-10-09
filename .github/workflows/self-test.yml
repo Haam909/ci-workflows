@@ -22,6 +22,18 @@ permissions:
   contents: read
 
 jobs:
+  # onboard and the onboard harness: shellcheck, and their handling of GitHub
+  # errors against a fake gh (tests/onboard/offline). No network.
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          shellcheck -x -P SCRIPTDIR -S warning -s bash \
+            local/bin/onboard tests/onboard/run tests/onboard/stage tests/onboard/lib.sh tests/onboard/rows.sh \
+            tests/onboard/offline/run tests/onboard/offline/onboard.sh tests/onboard/offline/harness.sh tests/onboard/offline/bin/gh
+      - run: bash tests/onboard/offline/run
+
   discover:
     runs-on: ubuntu-latest
     outputs:

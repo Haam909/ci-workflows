@@ -1,4 +1,5 @@
 # tests/onboard/rows.sh — one function per configuration. Sourced by run.
+# shellcheck disable=SC2034  # each variable a row sets is read by lib.sh
 #
 # A row sets:
 #   SEED        parts to assemble (see parts/), space-separated
