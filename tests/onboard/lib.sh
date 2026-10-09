@@ -9,10 +9,22 @@ GITHUB_ACTIONS_APP=15368
 log()  { printf '%s\n' "▶ $*" | tee -a "${LOG}"; }
 note() { printf '%s\n' "» · $*" | tee -a "${LOG}"; }
 pass() { printf '%s\n' "» ✓ $*" | tee -a "${LOG}"; }
-fail() { printf '%s\n' "» ✗ $*" | tee -a "${LOG}"; ROW_OK=false; }
+fail() { printf '%s\n' "» ✗ $*" | tee -a "${LOG}"; ROW_OK=false; ROW_FAILED=true; }
+# GitHub or the network, not the code under test: the row ends INFRA, not FAIL.
+infra() { printf '%s\n' "» ⚠ INFRA: $*" | tee -a "${LOG}"; ROW_OK=false; }
 # Run a command, keep its output in the log, return its status.
 logged() { local rc; { "$@"; } > "${WORK_ROW}/last.out" 2>&1; rc=$?; sed 's/\x1b\[[0-9;]*m//g' "${WORK_ROW}/last.out" >> "${LOG}"; return ${rc}; }
 last_out() { sed 's/\x1b\[[0-9;]*m//g' "${WORK_ROW}/last.out"; }
+# A step that talks to GitHub: logged, and tried again after a bad moment.
+retried() { local try; for try in 1 2 3; do logged "$@" && return 0; transient_out || return 1; (( try < 3 )) && sleep 20; done; return 1; }
+# Did the last step fail on GitHub or the network rather than on what it tested?
+transient_out() {
+  last_out | grep -qiE 'HTTP 5[0-9]{2}|5[0-9]{2} (Bad Gateway|Service Unavailable|Gateway Time)|timed out|timeout|Could not resolve|Connection (reset|refused)|unable to access|repository is disabled|RPC failed|rate limit|TLS handshake|Sigstore verifier|ECONNRESET|ETIMEDOUT|couldn.t read .* from GitHub|can.t read .* from GitHub|can.t fetch'
+}
+# fail, or infra when the last step failed on GitHub or the network.
+fail_step() { if transient_out; then infra "$*"; else fail "$*"; fi; }
+# The row's outcome as its subshell's exit status: 0 PASS, 1 FAIL, 3 INFRA.
+exit_row() { [[ "${ROW_FAILED}" == true ]] && exit 1; [[ "${ROW_OK}" == true ]] && exit 0; exit 3; }
 
 # Poll until a command succeeds. wait_for <seconds> <description> <command...>
 wait_for() {
@@ -72,8 +84,10 @@ push_seed() {
     if declare -F pre_seed > /dev/null; then pre_seed; fi
     git add -A && git commit -qm "seed" && git remote add origin "https://github.com/${REPO}.git"
     for t in ${TAGS}; do git tag -a "$t" -m "$t"; done
-    git push -q --force origin "${BRANCH}" && { [[ -z "${TAGS}" ]] || git push -q --force origin --tags; }
-  ) >> "${LOG}" 2>&1 || { fail "pushing the seed failed"; return 1; }
+  ) >> "${LOG}" 2>&1 || { fail "preparing the seed failed"; return 1; }
+  retried git -C "${dir}" push -q --force origin "${BRANCH}" \
+    && { [[ -z "${TAGS}" ]] || retried git -C "${dir}" push -q --force origin --tags; } \
+    || { fail_step "pushing the seed failed: $(last_out | tail -1)"; return 1; }
   gh api -X PATCH "repos/${REPO}" -f default_branch="${BRANCH}" > /dev/null
   for b in $(gh api "repos/${REPO}/branches?per_page=100" --jq '.[].name'); do
     [[ "$b" == "${BRANCH}" ]] || gh api -X DELETE "repos/${REPO}/git/refs/heads/${b}" > /dev/null
@@ -190,7 +204,7 @@ crlf_clone_runs_gate() {
   for f in bin/ci bin/signoff .githooks/pre-push; do grep -q $'\r' "$d/$f" && { fail "$f has CRLF in an autocrlf clone"; bad=1; }; done
   [[ "${bad}" == 0 ]] && pass "gate files are LF in an autocrlf=true clone"
   # A fresh clone has no node_modules: install first, as a developer would.
-  (cd "$d" && logged bash bin/ci --install --quick) && pass "bin/ci --install --quick runs in the autocrlf clone" || fail "bin/ci --install --quick failed in the autocrlf clone"
+  (cd "$d" && retried bash bin/ci --install --quick) && pass "bin/ci --install --quick runs in the autocrlf clone" || fail_step "bin/ci --install --quick failed in the autocrlf clone"
 }
 
 # ------------------------------------------------------------ developer ----
@@ -203,17 +217,17 @@ dev_setup() {
   [[ -d "${venv}" ]] || python -m venv "${venv}" >> "${LOG}" 2>&1
   if [[ -d "${venv}/Scripts" ]]; then PATH="${venv}/Scripts:${PATH}"; else PATH="${venv}/bin:${PATH}"; fi
   export PATH VIRTUAL_ENV="${venv}"
-  python -m pip install --quiet ruff pytest >> "${LOG}" 2>&1
+  retried python -m pip install --quiet ruff pytest || fail_step "developer setup: installing ruff and pytest failed"
   while IFS=' ' read -r rt d; do
     case "${rt}" in
       python)
-        if [[ -f "$d/requirements.txt" ]]; then python -m pip install --quiet -r "$d/requirements.txt"
-        else python -m pip install --quiet -e "$d[dev]"; fi ;;
-      node) (cd "$d" && npm ci --silent --no-audit --no-fund) ;;
-    esac >> "${LOG}" 2>&1 || fail "developer setup: installing ${d} (${rt}) failed"
+        if [[ -f "$d/requirements.txt" ]]; then retried python -m pip install --quiet -r "$d/requirements.txt"
+        else retried python -m pip install --quiet -e "$d[dev]"; fi ;;
+      node) retried npm ci --prefix "$d" --silent --no-audit --no-fund ;;
+    esac || fail_step "developer setup: installing ${d} (${rt}) failed"
   done < <(yq '.components[] | .runtime + " " + (.path // ".")' .github/components.yml)
   pass "developer setup (venv with ruff and pytest; each component's dependencies)"
-  logged bash bin/ci --install && pass "bin/ci --install" || fail "bin/ci --install: $(last_out | grep -iE 'error|✗' | head -2 | tr '\n' ' ')"
+  retried bash bin/ci --install && pass "bin/ci --install" || fail_step "bin/ci --install: $(last_out | grep -iE 'error|✗' | head -2 | tr '\n' ' ')"
 }
 
 # ------------------------------------------------------------ expectations ----
@@ -262,6 +276,13 @@ stopped_as_expected() {
   return 1
 }
 
+# onboard's own failure is a FAIL, unless all it reports is GitHub reads it
+# couldn't make after retrying.
+onboard_failed() {
+  local problems; problems="$(last_out | grep -E '✗|^can.t ')"
+  if [[ -n "${problems}" ]] && ! grep -qvE "couldn.t (read|list)|can.t (read|fetch)" <<< "${problems}"; then infra "$*"; else fail "$*"; fi
+}
+
 onboard_pr() { gh pr list -R "${REPO}" --head chore/onboard-ci --state open --json number --jq '.[0].number // empty'; }
 
 checks_settled() {       # pr — the gate's three checks have all reported, none pending
@@ -286,7 +307,7 @@ onboard_repo() {
     log "onboard apply (pass ${pass_no})"
     if ! run_onboard apply; then
       stopped_as_expected && return 2
-      fail "onboard apply failed: $(last_out | tail -3 | tr '\n' ' ')"; return 1
+      onboard_failed "onboard apply failed: $(last_out | tail -3 | tr '\n' ' ')"; return 1
     fi
     local pr; pr="$(onboard_pr)"
     [[ -z "${pr}" ]] && break                 # direct push, or merged: done
@@ -303,7 +324,7 @@ onboard_repo() {
   if [[ -n "${stop_at:-}" ]]; then fail "onboard was expected to stop with /${stop_at}/ but completed"; return 1; fi
 
   log "onboard check"
-  if run_onboard check; then pass "onboard check: $(last_out | tail -1)"; else fail "onboard check: $(last_out | grep '✗' | tr '\n' ' ')"; return 1; fi
+  if run_onboard check; then pass "onboard check: $(last_out | tail -1)"; else onboard_failed "onboard check: $(last_out | grep '✗' | tr '\n' ' ')"; return 1; fi
   git switch -q "${BRANCH}" && git pull -q --ff-only
 
   # What onboarding put on the default branch.
@@ -335,7 +356,7 @@ feature_pr() {
   git switch -q -c feature/sandbox-change
   echo "change $(date +%s)" >> README.md
   git commit -qam "feature: sandbox change"
-  logged git push -q -u origin feature/sandbox-change || { fail "push of feature branch refused: $(last_out | tail -2 | tr '\n' ' ')"; return 1; }
+  retried git push -q -u origin feature/sandbox-change || { fail_step "push of feature branch refused: $(last_out | tail -2 | tr '\n' ' ')"; return 1; }
   local pr; pr="$(gh pr create -R "${REPO}" --base "${BRANCH}" --head feature/sandbox-change --title "feature: sandbox change" --body "tests/onboard" | grep -o '[0-9]*$')"
   wait_for 900 "checks on PR #${pr}" checks_settled "${pr}" || return 1
   local states; states="$(gh pr checks "${pr}" -R "${REPO}" --json name,state --jq 'map(.name + "=" + .state) | join(", ")')"
@@ -347,7 +368,7 @@ feature_pr() {
   fi
   local method
   for method in squash rebase merge; do [[ " ${MERGES} " == *" ${method} "* ]] && break; done
-  logged gh pr merge "${pr}" -R "${REPO}" "--${method}" --delete-branch || { fail "merging feature PR failed: $(last_out | tail -1)"; return 1; }
+  logged gh pr merge "${pr}" -R "${REPO}" "--${method}" --delete-branch || { fail_step "merging feature PR failed: $(last_out | tail -1)"; return 1; }
   git switch -q "${BRANCH}" && git pull -q --ff-only
   RELEASE_SHA="$(git rev-parse HEAD)"
   pass "feature PR merged by ${method}: $(git log --oneline -1)"
@@ -370,7 +391,7 @@ release() {
   printf '{"reviewers":[{"type":"User","id":%s}]}' "${me}" | gh api -X PUT "repos/${REPO}/environments/production" --input - > /dev/null 2>&1 \
     || note "production can't hold for review here (plan or visibility); promote will run and fail at azure/login"
   local before; before="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  logged gh workflow run trigger-release.yml -R "${REPO}" --ref "${BRANCH}" -f sha="${RELEASE_SHA}" || { fail "dispatching the release failed: $(last_out | tail -1)"; return 1; }
+  logged gh workflow run trigger-release.yml -R "${REPO}" --ref "${BRANCH}" -f sha="${RELEASE_SHA}" || { fail_step "dispatching the release failed: $(last_out | tail -1)"; return 1; }
   local run=""
   wait_for 120 "the release run to appear" bash -c "[[ -n \"\$(gh run list -R '${REPO}' --workflow trigger-release.yml --created '>=${before}' --json databaseId --jq '.[0].databaseId')\" ]]" || return 1
   run="$(gh run list -R "${REPO}" --workflow trigger-release.yml --created ">=${before}" --json databaseId --jq '.[0].databaseId')"
@@ -422,7 +443,7 @@ release() {
 check_assets() {
   local v="${VERSION}" d="${WORK_ROW}/assets" n rt tg pid art
   rm -rf "$d"; mkdir -p "$d"
-  logged gh release download "v${v}" -R "${REPO}" -D "$d" || { fail "no release v${v}: $(last_out | tail -1)"; return 1; }
+  retried gh release download "v${v}" -R "${REPO}" -D "$d" --clobber || { fail_step "no release v${v}: $(last_out | tail -1)"; return 1; }
   note "assets: $(ls "$d" | tr '\n' ' ')"
   (cd "$d" && sha256sum -c SHA256SUMS > /dev/null 2>&1) && pass "SHA256SUMS matches every asset" || fail "SHA256SUMS mismatch"
   while IFS=' ' read -r n rt tg; do
@@ -444,9 +465,9 @@ check_assets() {
     fi
     local root; root="$(jq -r '.metadata.component | "\(.name)@\(.version)"' "$d/${n}-${v}.cdx.json" 2> /dev/null)"
     [[ "${root}" == *"@${v}" ]] && pass "${n}: SBOM root ${root}" || fail "${n}: SBOM root '${root:-missing}'"
-    if logged gh attestation verify "$d/${art}" -R "${REPO}" --signer-repo "${CIW_REPO}"; then pass "${n}: attestation verifies"
+    if retried gh attestation verify "$d/${art}" -R "${REPO}" --signer-repo "${CIW_REPO}"; then pass "${n}: attestation verifies"
     elif [[ "${VIS}" == private ]]; then note "${n}: no attestation (private repo; GitHub offers them there only with Enterprise Cloud)"
-    else fail "${n}: attestation: $(last_out | grep -iE 'error|fail' | head -1)"; fi
+    else fail_step "${n}: attestation: $(last_out | grep -iE 'error|fail' | head -1)"; fi
   done < <(yq '.components[] | .name + " " + .runtime + " " + .target' .github/components.yml)
 }
 
@@ -485,30 +506,31 @@ run_row() {
   claim_sandbox || return 1
   CIW_REPO="Haam909/ci-workflows"
   WORK_ROW="${WORK}/${slug}"; rm -rf "${WORK_ROW}"; mkdir -p "${WORK_ROW}"
-  LOG="${WORK_ROW}/log.txt"; : > "${LOG}"; ROW_OK=true
+  LOG="${WORK_ROW}/log.txt"; : > "${LOG}"; ROW_OK=true; ROW_FAILED=false
   local started; started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   log "row ${ROW}: seed [${SEED}] branch=${BRANCH} vis=${VIS} merges=[${MERGES}] protect=${PROTECT} tags=[${TAGS}] deploy=${DEPLOY}"
   note "repo https://github.com/${REPO}, onboard from ${ONBOARD} ($(git -C "${CIW_UNDER_TEST}" rev-parse --short HEAD)), triggers @${CIW_REF}"
 
   local rc=0
   (
-    ensure_repo && reset_repo || { fail "sandbox setup failed"; exit 1; }
-    push_seed || exit 1
+    # Setup is all GitHub calls; a row-specific refusal (visibility) is a fail of its own.
+    ensure_repo && reset_repo || { [[ "${ROW_FAILED}" == true ]] || infra "sandbox setup failed"; exit_row; }
+    push_seed || exit_row
     apply_protection
-    git clone -q "https://github.com/${REPO}.git" "${WORK_ROW}/repo" >> "${LOG}" 2>&1 || { fail "clone failed"; exit 1; }
+    retried git clone -q "https://github.com/${REPO}.git" "${WORK_ROW}/repo" || { fail_step "clone failed: $(last_out | tail -1)"; exit_row; }
     cd "${WORK_ROW}/repo" || exit 1
     if declare -F pre_clone > /dev/null; then pre_clone; fi
     onboard_repo; rc=$?
-    [[ "${rc}" == 2 ]] && { [[ "${ROW_OK}" == true ]] && exit 0 || exit 1; }   # stopped where the row expects
+    [[ "${rc}" == 2 ]] && exit_row   # stopped where the row expects
     # Carry on after a ✗ so one row reports everything it hits; the row fails at the end.
-    [[ "${rc}" == 0 ]] || exit 1
-    feature_pr || exit 1
-    release || exit 1
-    [[ "${ROW_OK}" == true ]]
+    [[ "${rc}" == 0 ]] || exit_row
+    feature_pr || exit_row
+    release || exit_row
+    exit_row
   ); rc=$?
 
   {
-    echo "## ${ROW} — $([[ ${rc} == 0 ]] && echo PASS || echo FAIL)"
+    echo "## ${ROW} — $(case ${rc} in 0) echo PASS ;; 3) echo INFRA ;; *) echo FAIL ;; esac)"
     echo
     echo "Started ${started}. Sandbox https://github.com/${REPO}. ci-workflows under test: $(git -C "${CIW_UNDER_TEST}" rev-parse --short HEAD), triggers @${CIW_REF}."
     echo
