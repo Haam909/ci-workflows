@@ -13,11 +13,13 @@
 #   CIW_REF          ref the sandbox triggers call (default: v1)
 #   OWNER            account that owns the sandboxes (default: the gh user)
 #   KEEP_GOING=1     with several rows, don't stop at the first failure
-#   POOL             number of sandboxes (default: 10)
+#   POOL             number of public sandboxes (default: 10)
+#   PRIVATE_POOL     number of private sandboxes, for private rows (default: 2)
 #   WORK, RESULTS    where clones/logs and results/<row>.md go
 #
-# Rows run in a pool of sandbox repos, ${OWNER}/ciw-sbx-01..${POOL:-10}, each
-# reset (not deleted) before a row uses it. Several runs can go at once; each
+# Rows run in a pool of sandbox repos, ${OWNER}/ciw-sbx-01..${POOL:-10}, and
+# private rows in ${OWNER}/ciw-sbx-p01..${PRIVATE_POOL:-2}, each reset (not
+# deleted) before a row uses it. Several runs can go at once; each
 # row waits for a free sandbox. Results go to results/<row>.md.
 #
 # Needs: bash, git, gh (repo + workflow scopes), yq, jq, dotnet, node, python.

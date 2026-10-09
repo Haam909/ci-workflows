@@ -33,8 +33,11 @@ layout (default branch, visibility, protection, merge methods, existing tags
 and files, leftover branches, a branch that moves mid-onboarding, CRLF
 checkouts). Seeds are assembled from `parts/`.
 
-Rows share a pool of sandboxes, `<you>/ciw-sbx-01` to `-10` (`POOL`), created
-on first use and reset before each row; GitHub limits how fast an account can
+Rows share a pool of public sandboxes, `<you>/ciw-sbx-01` to `-10` (`POOL`),
+and private rows a pool of private ones, `<you>/ciw-sbx-p01` to `-p02`
+(`PRIVATE_POOL`). A sandbox keeps the visibility it was created with: GitHub
+refuses git access to a repo for a while after its visibility changes. Each is
+created on first use and reset before each row; GitHub limits how fast an account can
 create repos, so they're reused rather than made per row. Several `run`s can go
 at once: each row waits for a free sandbox. Nothing is deleted except inside
 a sandbox: its rulesets, protection, environments, releases, tags and branches. The result is

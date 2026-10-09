@@ -28,7 +28,7 @@ wait_for() {
 
 ensure_repo() {
   gh api "repos/${REPO}" > /dev/null 2>&1 && return 0
-  gh repo create "${REPO}" --public --description "ci-workflows onboarding sandbox (tests/onboard); reset on every run" > /dev/null
+  gh repo create "${REPO}" "--${VIS}" --description "ci-workflows onboarding sandbox (tests/onboard); reset on every run" > /dev/null
 }
 
 # Back to nothing: no protection, environments, releases, tags, PRs or extra
@@ -45,14 +45,10 @@ reset_repo() {
   for id in $(gh pr list -R "${REPO}" --state open --json number --jq '.[].number'); do gh pr close -R "${REPO}" "${id}" > /dev/null; done
   gh api -X PATCH "repos/${REPO}" -F allow_squash_merge=true -F allow_rebase_merge=true -F allow_merge_commit=true \
     -F delete_branch_on_merge=false > /dev/null
-  [[ "$(gh api "repos/${REPO}" --jq .visibility)" == public ]] || set_visibility public
-}
-
-# GitHub refuses git access for a while after a visibility change ("Your
-# repository is disabled", or a 403); wait until git can reach it again.
-set_visibility() {       # public | private
-  gh repo edit "${REPO}" --visibility "$1" --accept-visibility-change-consequences > /dev/null
-  wait_for 300 "git access after making ${REPO} $1" git ls-remote --heads "https://github.com/${REPO}.git"
+  # Sandboxes never change visibility: GitHub refuses git access ("Your
+  # repository is disabled") for a while after a change.
+  local vis; vis="$(gh api "repos/${REPO}" --jq .visibility)"
+  [[ "${vis}" == "${VIS}" ]] || { fail "${REPO} is ${vis}, the row needs ${VIS}; sandboxes keep the visibility they were created with"; return 1; }
 }
 
 assemble_seed() {        # dir
@@ -76,15 +72,12 @@ push_seed() {
     if declare -F pre_seed > /dev/null; then pre_seed; fi
     git add -A && git commit -qm "seed" && git remote add origin "https://github.com/${REPO}.git"
     for t in ${TAGS}; do git tag -a "$t" -m "$t"; done
-    # After a visibility change GitHub can still refuse writes once reads work.
-    for try in 1 2 3 4 5 6 7 8 9 10; do git push -q --force origin "${BRANCH}" && break; [[ ${try} == 10 ]] && exit 1; sleep 30; done
-    [[ -z "${TAGS}" ]] || git push -q --force origin --tags
+    git push -q --force origin "${BRANCH}" && { [[ -z "${TAGS}" ]] || git push -q --force origin --tags; }
   ) >> "${LOG}" 2>&1 || { fail "pushing the seed failed"; return 1; }
   gh api -X PATCH "repos/${REPO}" -f default_branch="${BRANCH}" > /dev/null
   for b in $(gh api "repos/${REPO}/branches?per_page=100" --jq '.[].name'); do
     [[ "$b" == "${BRANCH}" ]] || gh api -X DELETE "repos/${REPO}/git/refs/heads/${b}" > /dev/null
   done
-  [[ "${VIS}" != private ]] || set_visibility private || return 1
   local m args=(-F allow_squash_merge=false -F allow_rebase_merge=false -F allow_merge_commit=false)
   for m in ${MERGES}; do
     case "$m" in squash) args[1]=allow_squash_merge=true ;; rebase) args[3]=allow_rebase_merge=true ;; merge) args[5]=allow_merge_commit=true ;; esac
@@ -418,8 +411,11 @@ release() {
     return 0
   fi
 
-  [[ "$(job_conclusion "${run}" '^build')" == success ]] && pass "build jobs succeeded" || { fail "build jobs: $(job_conclusion "${run}" '^build')"; return 1; }
-  [[ "$(job_conclusion "${run}" '^tag and draft')" == success ]] && pass "draft release published" || { fail "publish: $(job_conclusion "${run}" '^tag and draft')"; return 1; }
+  local c
+  c="$(job_conclusion "${run}" '^build')"
+  [[ "${c}" == success ]] && pass "build jobs succeeded" || { fail "build jobs: ${c:-no conclusion}"; return 1; }
+  c="$(job_conclusion "${run}" '^tag and draft')"
+  [[ "${c}" == success ]] && pass "draft release published" || { fail "publish: ${c:-no conclusion}"; return 1; }
   check_assets
 }
 
@@ -456,14 +452,16 @@ check_assets() {
 
 # ------------------------------------------------------------ one row ----
 
-# A pool of POOL sandboxes, ${OWNER}/ciw-sbx-01.., shared by every row (GitHub
-# limits how fast an account may create repos). A row takes the first free
-# one; mkdir is the lock, so several `run`s can go at once.
+# Two pools shared by every row (GitHub limits how fast an account may create
+# repos): POOL public sandboxes, ${OWNER}/ciw-sbx-01.., and PRIVATE_POOL
+# private ones, ${OWNER}/ciw-sbx-p01... A row takes the first free one of its
+# visibility; mkdir is the lock, so several `run`s can go at once.
 claim_sandbox() {
-  local i slot end=$(( $(date +%s) + 7200 ))
+  local i slot n=${POOL:-10} prefix="" end=$(( $(date +%s) + 7200 ))
+  [[ "${VIS}" == private ]] && { n=${PRIVATE_POOL:-2}; prefix=p; }
   while (( $(date +%s) < end )); do
-    for (( i = 1; i <= ${POOL:-10}; i++ )); do
-      slot="$(printf '%02d' "$i")"
+    for (( i = 1; i <= n; i++ )); do
+      slot="${prefix}$(printf '%02d' "$i")"
       if mkdir "${LOCKS}/slot-${slot}.lock" 2> /dev/null; then
         SLOT_LOCK="${LOCKS}/slot-${slot}.lock"; REPO="${OWNER}/ciw-sbx-${slot}"
         echo "${ROW} $$" > "${SLOT_LOCK}/owner"
