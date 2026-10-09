@@ -437,10 +437,10 @@ update_onboarding_branch() {
 
 # The onboarding PR exists: merge it if it can be, otherwise say what it waits on.
 handle_onboarding_pr() {   # pr
-  local pr="$1" st i method subject
+  local pr="$1" st method subject
   say "onboarding PR #${pr}"
   # GitHub computes mergeability in the background; UNKNOWN means not yet.
-  for i in 1 2 3 4 5 6; do
+  for _ in 1 2 3 4 5 6; do
     st="$(retry gh pr view "${pr}" --json mergeStateStatus --jq .mergeStateStatus)" || die "can't read PR #${pr} from GitHub (the error is above)"
     [[ "${st}" != UNKNOWN ]] && break
     sleep 5

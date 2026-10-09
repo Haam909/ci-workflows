@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# A fake gh for the offline tests: plays back ${FAKE_Q} one answer per call,
+# each line "rc|stdout|stderr", and logs each call's arguments to ${FAKE_LOG}.
+echo "$*" >> "${FAKE_LOG}"
+line="$(head -1 "${FAKE_Q}")"; sed -i 1d "${FAKE_Q}"
+IFS='|' read -r rc out err <<< "${line}"
+[[ -n "${out}" ]] && printf '%s\n' "${out}"
+[[ -n "${err}" ]] && printf '%s\n' "${err}" >&2
+exit "${rc:-1}"

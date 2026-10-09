@@ -57,6 +57,16 @@ tests/onboard/stage --delete                 # afterwards
 `stage` pushes HEAD to `test/stage-<sha>` with one extra commit that points
 the internal action references at that branch. It never reaches main.
 
+## Offline checks
+
+`tests/onboard/offline/run` checks, against a fake `gh` and in seconds, how
+`onboard` and the harness handle GitHub errors: a bad moment (5xx, timeout)
+is retried, a read that still fails stops instead of being taken for an
+answer, a plan refusal is still an answer, and a row that fails only on
+GitHub ends INFRA. The `self-test` workflow runs it on every pull request,
+with shellcheck. A change to how either script talks to GitHub adds a case
+there.
+
 ## What a single account can't test
 
 - Team reviewers need an organization; `--reviewer team:ORG/SLUG` is only
