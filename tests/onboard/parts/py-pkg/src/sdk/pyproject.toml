@@ -1,0 +1,17 @@
+[project]
+name = "ciw-sbx-sdk"
+version = "0.0.0"
+dependencies = ["tomli-w==1.0.0"]
+
+[project.optional-dependencies]
+dev = ["iniconfig==2.0.0"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["ciw_sdk"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

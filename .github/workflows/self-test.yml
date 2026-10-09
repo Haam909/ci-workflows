@@ -5,7 +5,8 @@
 # checks the artifact and the SBOM. No consumer repo, release or version is
 # involved.
 #
-# Container targets aren't covered: they need a registry to push to.
+# Container targets push to a registry service container on localhost:5000,
+# so they need no Azure.
 
 name: self-test
 
@@ -40,6 +41,10 @@ jobs:
     name: ${{ matrix.component.name }}
     env:
       VERSION: '1.2.3'
+    services:
+      registry:
+        image: registry:2
+        ports: ['5000:5000']
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +57,7 @@ jobs:
         with:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ env.VERSION }}
+          registry: ${{ matrix.component.target == 'container' && 'localhost:5000' || '' }}
 
       - id: sbom
         uses: ./actions/generate-sbom
@@ -73,25 +79,34 @@ jobs:
 
           echo "Artifacts:"; ls -l _artifacts
 
-          # The build's own output must be the file the glob names.
-          GLOB="$(jq -r '.test.artifact' <<< "$C")"
-          [[ "$(basename "${ARTIFACT}")" == ${GLOB} ]] \
-            || bad "artifact is $(basename "${ARTIFACT}"), expected ${GLOB}"
-          [[ "$(basename "${ARTIFACT}")" == *"${VERSION}"* ]] \
-            || bad "artifact name doesn't carry ${VERSION}"
+          IMAGE="$(jq -r '.test.image // empty' <<< "$C")"
+          if [[ -n "${IMAGE}" ]]; then
+            # A container's artifact is the digest reference it was pushed as.
+            [[ "${ARTIFACT}" == "${IMAGE}@sha256:"* ]] || bad "artifact is ${ARTIFACT}, expected ${IMAGE}@sha256:..."
+            docker pull --quiet "${ARTIFACT}" > /dev/null || bad "can't pull ${ARTIFACT} back from the registry"
+            LABEL="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "${ARTIFACT}" 2> /dev/null || true)"
+            [[ "${LABEL}" == "${VERSION}" ]] || bad "image version label is '${LABEL}', expected ${VERSION}"
+          else
+            # The build's own output must be the file the glob names.
+            GLOB="$(jq -r '.test.artifact' <<< "$C")"
+            [[ "$(basename "${ARTIFACT}")" == ${GLOB} ]] \
+              || bad "artifact is $(basename "${ARTIFACT}"), expected ${GLOB}"
+            [[ "$(basename "${ARTIFACT}")" == *"${VERSION}"* ]] \
+              || bad "artifact name doesn't carry ${VERSION}"
 
-          case "${ARTIFACT}" in
-            *.tgz) ENTRIES="$(tar -tzf "${ARTIFACT}")" ;;
-            *)     ENTRIES="$(unzip -Z1 "${ARTIFACT}")" ;;
-          esac
-          while read -r e; do
-            [[ -z "$e" ]] && continue
-            grep -qxF "$e" <<< "${ENTRIES}" || bad "artifact is missing ${e}"
-          done <<< "$(list entries)"
-          while read -r e; do
-            [[ -z "$e" ]] && continue
-            ! grep -q "^${e}" <<< "${ENTRIES}" || bad "artifact should not contain ${e}"
-          done <<< "$(list forbid-entries)"
+            case "${ARTIFACT}" in
+              *.tgz) ENTRIES="$(tar -tzf "${ARTIFACT}")" ;;
+              *)     ENTRIES="$(unzip -Z1 "${ARTIFACT}")" ;;
+            esac
+            while read -r e; do
+              [[ -z "$e" ]] && continue
+              grep -qxF "$e" <<< "${ENTRIES}" || bad "artifact is missing ${e}"
+            done <<< "$(list entries)"
+            while read -r e; do
+              [[ -z "$e" ]] && continue
+              ! grep -q "^${e}" <<< "${ENTRIES}" || bad "artifact should not contain ${e}"
+            done <<< "$(list forbid-entries)"
+          fi
 
           ROOT="$(jq -r '.metadata.component.version // "none"' "${SBOM}")"
           [[ "${ROOT}" == "${VERSION}" ]] || bad "SBOM names the component at ${ROOT}, expected ${VERSION}"

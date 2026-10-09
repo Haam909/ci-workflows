@@ -69,3 +69,45 @@ components:
       entries: [selftest_pkg/__init__.py]
       deps: [tomli-w]
       forbid-deps: [iniconfig, cyclonedx-bom, build, pip]
+
+  # Functions: the zip must hold what the Functions host loads.
+  - name: dotnet-func
+    runtime: dotnet
+    target: function
+    project: tests/fixtures/dotnet-func/DotnetFunc.csproj
+    dotnet-version: '10.0.x'
+    test:
+      artifact: dotnet-func-*.zip
+      entries: [host.json, DotnetFunc.dll, functions.metadata, worker.config.json]
+      deps: [microsoft.azure.functions.worker]
+
+  - name: node-func
+    runtime: node
+    target: function
+    path: tests/fixtures/node-func
+    test:
+      artifact: node-func-*.zip
+      entries: [host.json, index.js, package.json, node_modules/ms/package.json]
+      forbid-entries: [node_modules/is-number/]
+      deps: [ms]
+      forbid-deps: [is-number]
+
+  - name: py-func
+    runtime: python
+    target: function
+    path: tests/fixtures/py-func
+    test:
+      artifact: py-func-*.zip
+      entries: [function_app.py, host.json, requirements.txt, .python_packages/lib/site-packages/azure/functions/__init__.py]
+      deps: [azure-functions]
+
+  # Container: pushed to the job's own registry (a service container), so no
+  # Azure is needed. The artifact is the pushed image's digest reference.
+  - name: py-container
+    runtime: python
+    target: container
+    path: tests/fixtures/py-container
+    dockerfile: tests/fixtures/py-container/Dockerfile
+    test:
+      image: localhost:5000/py-container
+      deps: [tomli-w]

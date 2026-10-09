@@ -1,0 +1,18 @@
+# Branch prefixes and the version bump each one asks for. The one list:
+# derive-version, the PR gate's branch-name check and local/bin/onboard's
+# branch naming ruleset all read it.
+breaking    major
+feature     minor
+feat        minor
+fix         patch
+hotfix      patch
+bugfix      patch
+chore       patch
+docs        patch
+refactor    patch
+test        patch
+ci          patch
+build       patch
+perf        patch
+deps        patch
+dependabot  patch

@@ -1,0 +1,25 @@
+name: 'Check branch name'
+description: >-
+  Fails unless the branch starts with a prefix from derive-version/prefixes,
+  which version derivation needs.
+
+inputs:
+  branch:
+    description: 'Branch name, e.g. feature/login'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+        PREFIXES: ${{ github.action_path }}/../derive-version/prefixes
+      run: |
+        set -euo pipefail
+        if [[ "${BRANCH}" == */* ]] && awk -v p="${BRANCH%%/*}" '!/^#/ && $1 == p { found=1 } END { exit !found }' "${PREFIXES}"; then
+          echo "OK: ${BRANCH}"
+        else
+          echo "::error::Branch '${BRANCH}' has no recognised prefix. Version derivation needs one of: $(awk '!/^#/ && NF { printf "%s/ ", $1 }' "${PREFIXES}")"
+          exit 1
+        fi

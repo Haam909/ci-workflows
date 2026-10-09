@@ -3,19 +3,28 @@
 #
 #   <ci-workflows>/local/bin/onboard init     write the files, then stop so you
 #                                             can check .github/components.yml
-#   <ci-workflows>/local/bin/onboard apply    run bin/ci, commit to main, tag
-#                                             v0.1.0, create the environments
+#   <ci-workflows>/local/bin/onboard apply    run bin/ci, land the files on the
+#                                             default branch (directly, or by a
+#                                             pull request where it's protected),
+#                                             tag v0.1.0, create the environments
 #                                             and rulesets, then check
 #   <ci-workflows>/local/bin/onboard check    only the check; changes nothing
 #
 # Options:
-#   --reviewer LOGIN      who approves releases (default: you)
+#   --reviewer WHO        who approves releases: LOGIN, user:LOGIN or
+#                         team:ORG/SLUG. Repeat for several (up to 6).
+#                         Default: you.
 #   --no-deploy-to-test   leave out trigger-merge-to-main.yml, for a repo with
 #                         no test environment to deploy to yet
+#   --ref REF             the ci-workflows ref the triggers call (default: v1)
 #
 # Safe to re-run. Each step looks first and only adds what is missing. It never
 # overwrites a workflow, environment or ruleset that already exists; `check`
-# reports where one differs from what the docs ask for.
+# reports where one differs from what the docs ask for, and what the repo's
+# plan or settings don't allow.
+#
+# Exit codes: 0 done (or a PR opened: re-run apply when its checks are green),
+# 1 a problem to fix, 3 the onboarding PR is waiting on a person (approval).
 #
 # Needs: bash, git, yq, gh (logged in, admin on the repo). dotnet or npm for
 # the lock files of whatever the repo contains. Azure setup is not covered.
@@ -27,14 +36,16 @@ export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 CIW="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MANIFEST=.github/components.yml
 ONBOARD_BRANCH=chore/onboard-ci
+ONBOARD_SUBJECT="ci: onboard to ci-workflows"     # the merge trigger skips commits starting with this
 MARK='# onboard: check this'
 CMD="${1:-}"; [[ $# -gt 0 ]] && shift
-REVIEWER=""; DEPLOY_TO_TEST=true
+REVIEWERS=(); DEPLOY_TO_TEST=true; REF=v1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --reviewer)          REVIEWER="${2:-}"; shift ;;
+    --reviewer)          REVIEWERS+=("${2:-}"); shift ;;
     --no-deploy-to-test) DEPLOY_TO_TEST=false ;;
+    --ref)               REF="${2:-}"; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -42,7 +53,7 @@ done
 
 case "${CMD}" in
   init|apply|check) ;;
-  -h|--help|"") sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help|"") sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "unknown command: ${CMD} (init, apply or check)" >&2; exit 2 ;;
 esac
 
@@ -62,15 +73,55 @@ GATE_FILES=(bin/ci bin/signoff .githooks/pre-push)
 TRIGGERS=(trigger-pull-request.yml trigger-release.yml)
 [[ "${DEPLOY_TO_TEST}" == true ]] && TRIGGERS+=(trigger-merge-to-main.yml)
 
-# Branch prefixes: keep in step with actions/derive-version and SETUP-GITHUB.md 8a.
-PREFIXES=(feature feat fix hotfix bugfix breaking chore docs refactor test ci build perf deps dependabot)
+# Branch prefixes: the one list, shared with derive-version and the PR gate.
+mapfile -t PREFIXES < <(awk '!/^#/ && NF { print $1 }' "${CIW}/actions/derive-version/prefixes")
+[[ ${#PREFIXES[@]} -gt 0 ]] || die "no prefixes in ${CIW}/actions/derive-version/prefixes"
 CHECKS=("ci / gate" "ci / branch-name" "local/ci")
 GITHUB_ACTIONS_APP=15368   # the GitHub Actions app on github.com
 
+# The default branch: what the clone recorded, else what GitHub says.
+default_branch() {
+  local b
+  b="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2> /dev/null)"; b="${b#origin/}"
+  local try
+  if [[ -z "$b" ]] && command -v gh > /dev/null; then
+    for try in 1 2 3; do
+      b="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2> /dev/null)" && break
+      (( try < 3 )) && sleep $(( try * 5 ))
+    done
+    # Guessing would apply or check the wrong branch; only init, which
+    # changes nothing on GitHub, takes the current one.
+    [[ -n "$b" || "${CMD}" == init ]] || die "can't read the default branch from GitHub; check your connection, or run: git remote set-head origin --auto"
+  fi
+  [[ -n "$b" ]] || b="$(git branch --show-current)"
+  echo "$b"
+}
+DEFAULT="$(default_branch)" || exit 1
+[[ -n "${DEFAULT}" ]] || die "can't tell the default branch; run: git remote set-head origin --auto"
+
+# A trigger as this repo should have it: its default branch, the chosen ref.
+render_trigger() {         # file
+  sed -e "s#^\(    branches: \)\[main\]#\1[${DEFAULT}]#" \
+      -e "s#^name: Merge to main#name: Merge to ${DEFAULT}#" \
+      -e "s#^\(    uses: Haam909/ci-workflows/.*\)@v1\$#\1@${REF}#" \
+      "${CIW}/examples/.github/workflows/$1"
+}
+
 # ---------------------------------------------------------------- init ----
 
+# A component in a folder is named after the folder. One at the repo root is
+# named after its project (package.json / pyproject.toml), else the repo: not
+# the clone's folder, which can be called anything.
+component_name() {        # dir project-name
+  local n
+  if [[ "$1" != . ]]; then n="$(basename "$1")"
+  elif [[ -n "$2" ]]; then n="$2"
+  else n="$(basename "$(git remote get-url origin 2> /dev/null || echo "${ROOT}")" .git)"; fi
+  tr 'A-Z_.' 'a-z--' <<< "$n"
+}
+
 scaffold_manifest() {
-  local out="" found=0 p dir name tfm ver target t
+  local out="" found=0 p dir name tfm target t
   # dotnet: every project that isn't a test project is a component.
   while IFS= read -r p; do
     grep -q 'Microsoft.NET.Test.Sdk' "$p" && continue
@@ -95,8 +146,9 @@ scaffold_manifest() {
 
   # node and python: one component per folder holding the project file.
   while IFS= read -r p; do
-    found=1; dir="$(dirname "$p")"; name="$( [[ "${dir}" == . ]] && basename "${ROOT}" || basename "${dir}")"
+    found=1; dir="$(dirname "$p")"; name="$(component_name "${dir}" "$(grep -o '"name": *"[^"]*' "$p" | head -1 | sed 's/.*"//; s#^@[^/]*/##')")"
     if [[ -f "${dir}/Dockerfile" ]]; then target=container
+    elif [[ -f "${dir}/host.json" ]]; then target=function
     elif grep -q '"private": *true' "$p"; then target=app-service
     else target=package; fi
     out+="  - name: ${name}   ${MARK}"$'\n'"    runtime: node"$'\n'"    target: ${target}   ${MARK}"$'\n'
@@ -107,7 +159,7 @@ scaffold_manifest() {
   done < <(git ls-files 'package.json' '*/package.json')
 
   while IFS= read -r dir; do
-    found=1; name="$( [[ "${dir}" == . ]] && basename "${ROOT}" || basename "${dir}")"
+    found=1; name="$(component_name "${dir}" "$(grep -o '^name *= *"[^"]*' "${dir}/pyproject.toml" 2> /dev/null | head -1 | sed 's/.*"//')")"
     if [[ -f "${dir}/Dockerfile" ]]; then target=container
     elif [[ -f "${dir}/host.json" ]]; then target=function
     elif [[ -f "${dir}/requirements.txt" || -f "${dir}/requirements.lock.txt" ]]; then target=app-service
@@ -126,14 +178,14 @@ scaffold_manifest() {
 }
 
 init() {
-  say "workflows"
+  say "workflows (branch ${DEFAULT}, ci-workflows@${REF})"
   mkdir -p .github/workflows
   for f in "${TRIGGERS[@]}"; do
     if [[ -f ".github/workflows/$f" ]]; then
-      cmp -s "${CIW}/examples/.github/workflows/$f" ".github/workflows/$f" \
-        && skip "$f already there" || warn "$f exists and differs from examples/; left alone"
+      render_trigger "$f" | cmp -s - ".github/workflows/$f" \
+        && skip "$f already there" || warn "$f exists and differs from examples/; left alone (onboard check lists the difference)"
     else
-      cp "${CIW}/examples/.github/workflows/$f" ".github/workflows/$f" && done_ "$f"
+      render_trigger "$f" > ".github/workflows/$f" && done_ "$f"
     fi
   done
 
@@ -150,7 +202,9 @@ init() {
   mkdir -p bin .githooks
   for f in "${GATE_FILES[@]}"; do
     src="${CIW}/local/${f/.githooks/githooks}"
-    if cmp -s "${src}" "$f"; then skip "$f up to date"; else cp "${src}" "$f" && done_ "$f"; fi
+    # Compare and copy the content git would store: LF, whatever the checkout.
+    if [[ -f "$f" ]] && tr -d '\r' < "${src}" | cmp -s - <(tr -d '\r' < "$f"); then skip "$f up to date"
+    else tr -d '\r' < "${src}" > "$f" && done_ "$f"; fi
   done
   # The .NET .gitignore ignores every bin/, this one included.
   if git check-ignore -q bin/ci; then
@@ -176,7 +230,7 @@ init() {
       printf '<Project>\n  <PropertyGroup>\n    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>\n  </PropertyGroup>\n</Project>\n' > Directory.Build.props
       done_ "Directory.Build.props with RestorePackagesWithLockFile"
     elif ! grep -q 'RestorePackagesWithLockFile' Directory.Build.props; then
-      die "Directory.Build.props exists without RestorePackagesWithLockFile; add <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile> to it and re-run"
+      die "Directory.Build.props exists without RestorePackagesWithLockFile; add <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile> to its <PropertyGroup> and re-run"
     fi
     while IFS= read -r p; do
       dotnet restore "$p" --use-lock-file > /dev/null || die "dotnet restore $p failed"
@@ -192,45 +246,315 @@ init() {
   echo "'${MARK}' marker, then run ${GREY}onboard apply${OFF}."
 }
 
+# ------------------------------------------------- GitHub: what's in effect ----
+
+# GitHub has bad moments (5xx, rate limits, no answer). A read retries those,
+# and tells "not there" (404) from "couldn't ask", so a bad moment is never
+# reported as something missing.
+GH_ERRF="$(mktemp)"; GH_BODYF="$(mktemp)"; GH_FAILF="$(mktemp)"; trap 'rm -f "${GH_ERRF}" "${GH_BODYF}" "${GH_FAILF}"' EXIT
+gh_err() { head -1 "${GH_ERRF}"; }
+
+transient() {              # stderr-file body-file
+  local code; code="$(grep -o '(HTTP [0-9]*)' "$1" | grep -o '[0-9]*' | head -1)"
+  [[ -z "${code}" || "${code}" == 5* || "${code}" == 429 ]] && return 0
+  cat "$1" "$2" | grep -qi 'rate limit'
+}
+
+# Prints the output: 0. Not found: 1. Any other error, after retries: 2, and
+# gh_err says what. gh prints an error's body on stdout; that is kept in
+# GH_BODYF, never printed as output.
+gh_read() {
+  local out try
+  for try in 1 2 3 4; do
+    if out="$(gh api "$@" 2> "${GH_ERRF}")"; then printf '%s\n' "${out}"; return 0; fi
+    printf '%s\n' "${out}" > "${GH_BODYF}"
+    grep -q '(HTTP 404)' "${GH_ERRF}" && return 1
+    transient "${GH_ERRF}" "${GH_BODYF}" || return 2
+    (( try < 4 )) && sleep $(( try * 5 ))
+  done
+  return 2
+}
+
+# The last read's refusal was the plan or visibility, not a bad moment.
+refused_by_plan() { grep -qiE '"message":"[^"]*(upgrade|plan|not available)' "${GH_BODYF}"; }
+
+# A read where "not there" and "can't read" both mean "nothing": the output
+# or nothing, and an error other than 404 is said on stderr.
+gh_get() {
+  gh_read "$@"; local rc=$?
+  # A plan or visibility refusal is an answer, not a failed read; check says
+  # what the plan doesn't offer.
+  if [[ ${rc} == 2 ]] && ! refused_by_plan; then
+    warn "couldn't read $1 from GitHub: $(gh_err)" >&2
+    printf '%s: %s\n' "$1" "$(gh_err)" >> "${GH_FAILF}"
+  fi
+  return ${rc}
+}
+
+retry() { local try; for try in 1 2 3; do "$@" && return 0; (( try < 3 )) && sleep $(( try * 5 )); done; return 1; }
+
+# Rule types in effect on the default branch, from every ruleset (repo or org)
+# that applies to it. Empty if none, or if the plan doesn't offer rulesets.
+effective_rules() { gh_get "repos/${REPO}/rules/branches/${DEFAULT}" --jq '.[].type' | sort -u; }
+
+# Classic branch protection as JSON, or nothing (404: not protected).
+classic_protection() { gh_get "repos/${REPO}/branches/${DEFAULT}/protection"; }
+
+# Does anything stop a direct push of the onboarding commit?
+push_blocked() {
+  : > "${GH_FAILF}"
+  local rules; rules="$(effective_rules)"
+  local cp; cp="$(classic_protection)"
+  [[ -s "${GH_FAILF}" ]] && die "can't read the branch protection on ${DEFAULT} from GitHub ($(head -1 "${GH_FAILF}")); re-run apply"
+  grep -qxE 'pull_request|required_status_checks|update|non_fast_forward_disabled' <<< "${rules}" && return 0
+  [[ -n "${cp}" ]] && jq -e '.required_pull_request_reviews or .required_status_checks or .restrictions' <<< "${cp}" > /dev/null 2>&1 && return 0
+  return 1
+}
+
+# Every check the default branch requires: rulesets plus classic protection.
+required_checks() {
+  {
+    gh_get "repos/${REPO}/rules/branches/${DEFAULT}" \
+      --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context'
+    classic_protection | jq -r '.required_status_checks.checks[]?.context // empty' 2> /dev/null
+  } | sort -u
+}
+
+# The first merge method the repo allows, in the order that keeps history
+# linear and one commit per PR.
+merge_method() {
+  local s; s="$(gh_read "repos/${REPO}" --jq '"\(.allow_squash_merge) \(.allow_rebase_merge) \(.allow_merge_commit)"')" \
+    || die "can't read ${REPO}'s merge settings from GitHub: $(gh_err)"
+  read -r sq rb mc <<< "$s"
+  if [[ "${sq}" == true ]]; then echo squash
+  elif [[ "${rb}" == true ]]; then echo rebase
+  elif [[ "${mc}" == true ]]; then echo merge
+  fi
+}
+
 # --------------------------------------------------------------- apply ----
 
-ensure_environment() {     # name [reviewer-id]
-  local env="$1" rid="${2:-}"
-  if gh api "repos/${REPO}/environments/${env}" > /dev/null 2>&1; then
-    skip "environment ${env} exists; left alone"
-  elif [[ -n "${rid}" ]]; then
-    printf '{"reviewers":[{"type":"User","id":%s}]}' "${rid}" \
-      | gh api -X PUT "repos/${REPO}/environments/${env}" --input - > /dev/null && done_ "environment ${env}, reviewer ${REVIEWER}"
+# Create, or report why the plan or settings won't allow it. Never overwrites.
+gh_create() {              # what method path [json]
+  local what="$1" method="$2" path="$3" body="${4:-}" try
+  # A PUT is safe to repeat; a POST that failed in a bad moment may have
+  # landed, so its caller checks before trying again.
+  for try in 1 2 3 4; do
+    if gh api -X "${method}" "${path}" --input - <<< "${body:-{\}}" > "${GH_BODYF}" 2> "${GH_ERRF}"; then done_ "${what}"; return 0; fi
+    [[ "${method}" == PUT ]] && transient "${GH_ERRF}" "${GH_BODYF}" && (( try < 4 )) || break
+    sleep $(( try * 5 ))
+  done
+  warn "${what}: GitHub refused it: $(grep -o '"message":"[^"]*' "${GH_BODYF}" | head -1 | sed 's/"message":"//' || true) $(gh_err)"
+  return 1
+}
+
+reviewers_json() {
+  local r kind who id me out=""
+  if [[ ${#REVIEWERS[@]} -eq 0 ]]; then
+    me="$(gh_read user --jq .login)" || die "can't read your GitHub login: $(gh_err)"
+    REVIEWERS=("${me}")
+  fi
+  [[ ${#REVIEWERS[@]} -le 6 ]] || die "GitHub allows at most 6 required reviewers per environment"
+  for r in "${REVIEWERS[@]}"; do
+    case "$r" in team:*) kind=Team; who="${r#team:}" ;; user:*) kind=User; who="${r#user:}" ;; *) kind=User; who="$r" ;; esac
+    if [[ "${kind}" == Team ]]; then
+      [[ "${who}" == */* ]] || die "--reviewer team:ORG/SLUG, got ${r}"
+      id="$(gh_read "orgs/${who%%/*}/teams/${who#*/}" --jq .id)"
+      case $? in 1) die "no team ${who} (or no access to it)" ;; 2) die "can't read team ${who} from GitHub: $(gh_err)" ;; esac
+    else
+      id="$(gh_read "users/${who}" --jq .id)"
+      case $? in 1) die "no GitHub user ${who}" ;; 2) die "can't read GitHub user ${who}: $(gh_err)" ;; esac
+    fi
+    out+="{\"type\":\"${kind}\",\"id\":${id}},"
+  done
+  echo "[${out%,}]"
+}
+
+ensure_environment() {     # name [reviewers-json]
+  local env="$1" rv="${2:-}"
+  gh_read "repos/${REPO}/environments/${env}" > /dev/null
+  case $? in
+    0) skip "environment ${env} exists; left alone"; return 0 ;;
+    # Creating is a PUT, which would overwrite one that is there.
+    2) die "can't read environment ${env} from GitHub: $(gh_err)" ;;
+  esac
+  if [[ -n "${rv}" ]]; then
+    gh_create "environment ${env}, reviewers ${REVIEWERS[*]}" PUT "repos/${REPO}/environments/${env}" "{\"reviewers\":${rv}}"
   else
-    gh api -X PUT "repos/${REPO}/environments/${env}" > /dev/null && done_ "environment ${env}"
+    gh_create "environment ${env}" PUT "repos/${REPO}/environments/${env}"
   fi
 }
 
 ensure_ruleset() {         # name json
-  if [[ -n "$(gh api "repos/${REPO}/rulesets" --jq ".[] | select(.name==\"$1\") | .id")" ]]; then
-    skip "ruleset '$1' exists; left alone"
+  local have try
+  for try in 1 2 3; do
+    # Not knowing what's there, a POST could make a second one.
+    have="$(gh_read "repos/${REPO}/rulesets" --jq ".[] | select(.name==\"$1\") | .id")"
+    [[ $? == 2 ]] && ! refused_by_plan && die "can't read the rulesets from GitHub: $(gh_err)"
+    if [[ -n "${have}" ]]; then
+      [[ ${try} == 1 ]] && skip "ruleset '$1' exists; left alone" || done_ "ruleset '$1'"
+      return 0
+    fi
+    gh_create "ruleset '$1'" POST "repos/${REPO}/rulesets" "$2" && return 0
+    transient "${GH_ERRF}" "${GH_BODYF}" || return 1
+    sleep $(( try * 5 ))
+  done
+  return 1
+}
+
+# What a PR's merge is waiting for, in words.
+pr_blockers() {            # pr
+  local v req c st
+  v="$(retry gh pr view "$1" --json reviewDecision,statusCheckRollup)" || die "can't read PR #$1 from GitHub (the error is above)"
+  case "$(jq -r '.reviewDecision // ""' <<< "$v")" in
+    REVIEW_REQUIRED)   echo "an approving review (the branch rules require one)" ;;
+    CHANGES_REQUESTED) echo "a reviewer requested changes" ;;
+  esac
+  req="$(required_checks)"
+  while IFS= read -r c; do
+    [[ -z "$c" ]] && continue
+    st="$(jq -r --arg c "$c" '[.statusCheckRollup[] | select((.name // .context) == $c or ((.workflowName // "") + " / " + (.name // "")) == $c)
+                              | (.conclusion // .state // .status)] | first // "never reported"' <<< "$v")"
+    # Reusable-workflow checks report as "<caller job> / <job>".
+    [[ "${st}" == "never reported" ]] && st="$(jq -r --arg c "${c#* / }" '[.statusCheckRollup[] | select(.name == $c) | (.conclusion // .status)] | first // "never reported"' <<< "$v")"
+    case "${st}" in SUCCESS|success|NEUTRAL|SKIPPED) ;; *) echo "required check '${c}': ${st}" ;; esac
+  done <<< "${req}"
+}
+
+# Bring the onboarding branch up to date the way a developer would: rebase,
+# then push, which runs bin/ci and signs off the new commit (pre-push).
+update_onboarding_branch() {
+  retry git fetch --quiet origin "${DEFAULT}" "${ONBOARD_BRANCH}" || die "can't fetch origin"
+  git switch --quiet -C "${ONBOARD_BRANCH}" "origin/${ONBOARD_BRANCH}" || die "can't check out ${ONBOARD_BRANCH}"
+  git rebase --quiet "origin/${DEFAULT}" || { git rebase --abort; git switch --quiet "${DEFAULT}"; die "${ONBOARD_BRANCH} conflicts with ${DEFAULT}; resolve it by hand (git rebase origin/${DEFAULT} on that branch)"; }
+  git push --quiet --force-with-lease origin "${ONBOARD_BRANCH}" || { git switch --quiet "${DEFAULT}"; die "pushing the rebased ${ONBOARD_BRANCH} failed"; }
+  git switch --quiet "${DEFAULT}"
+  done_ "rebased ${ONBOARD_BRANCH} onto ${DEFAULT} and pushed it; its checks run again"
+  echo
+  echo "${BOLD}Next:${OFF} when its checks are green (${GREY}gh pr checks ${ONBOARD_BRANCH}${OFF}), run ${GREY}onboard apply${OFF} again."
+  exit 0
+}
+
+# The onboarding PR exists: merge it if it can be, otherwise say what it waits on.
+handle_onboarding_pr() {   # pr
+  local pr="$1" st i method subject
+  say "onboarding PR #${pr}"
+  # GitHub computes mergeability in the background; UNKNOWN means not yet.
+  for i in 1 2 3 4 5 6; do
+    st="$(retry gh pr view "${pr}" --json mergeStateStatus --jq .mergeStateStatus)" || die "can't read PR #${pr} from GitHub (the error is above)"
+    [[ "${st}" != UNKNOWN ]] && break
+    sleep 5
+  done
+  case "${st}" in
+    CLEAN|HAS_HOOKS|UNSTABLE) ;;
+    BEHIND)
+      warn "${DEFAULT} has moved on since the PR was opened"
+      update_onboarding_branch ;;
+    DIRTY)
+      die "PR #${pr} conflicts with ${DEFAULT}. Rebase ${ONBOARD_BRANCH} onto origin/${DEFAULT}, fix the conflicts, push, then re-run apply." ;;
+    BLOCKED)
+      local why; why="$(pr_blockers "${pr}")" || exit 1
+      if grep -qiE 'PENDING|IN_PROGRESS|QUEUED|EXPECTED' <<< "${why}" && ! grep -q 'review' <<< "${why}"; then
+        die "PR #${pr}: checks still running. Re-run apply when they finish (gh pr checks ${pr} --watch).$(printf '\n  %s' "${why}")"
+      fi
+      printf '%s\n' "${YELLOW}PR #${pr} can't be merged yet. It is waiting on:${OFF}" >&2
+      [[ -n "${why}" ]] || why="something the branch rules require that GitHub does not itemise (see the PR page)"
+      printf '  - %s\n' "${why}" >&2
+      echo "When that's done, run ${GREY}onboard apply${OFF} again." >&2
+      exit 3 ;;
+    *) die "PR #${pr} can't be merged yet (${st}). See it with: gh pr view ${pr} --web" ;;
+  esac
+
+  method="$(merge_method)" || exit 1
+  [[ -n "${method}" ]] || die "the repo allows no merge method (Settings → General → Pull Requests)"
+  subject="${ONBOARD_SUBJECT} (#${pr})"
+  if [[ "${method}" == rebase ]]; then
+    gh pr merge "${pr}" --rebase --delete-branch > /dev/null || die "merging PR #${pr} failed"
   else
-    gh api -X POST "repos/${REPO}/rulesets" --input - <<< "$2" > /dev/null && done_ "ruleset '$1'"
+    gh pr merge "${pr}" "--${method}" --delete-branch --subject "${subject}" --body "" > /dev/null || die "merging PR #${pr} failed"
   fi
+  # Right after a merge, origin can still show ${DEFAULT} without it, and the
+  # starting tag would go on the commit before.
+  local merged="" try
+  for try in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    merged="$(gh pr view "${pr}" --json mergeCommit --jq '.mergeCommit.oid // empty' 2> /dev/null)"
+    [[ -n "${merged}" ]] && git fetch --quiet origin "${DEFAULT}" && git merge-base --is-ancestor "${merged}" "origin/${DEFAULT}" && break
+    merged=""; sleep 5
+  done
+  [[ -n "${merged}" ]] || die "PR #${pr} is merged, but origin/${DEFAULT} doesn't show it yet. Run git pull on ${DEFAULT}, then re-run apply."
+  git switch --quiet "${DEFAULT}" && git merge --quiet --ff-only "origin/${DEFAULT}" || die "can't update ${DEFAULT} after the merge"
+  done_ "merged by ${method}: $(git log --oneline -1)"
+}
+
+# The commit is ready on the default branch but can't be pushed there: move
+# it to the onboarding branch and open a PR.
+open_onboarding_pr() {
+  local pr remote_has
+  remote_has="$(retry git ls-remote --heads origin "${ONBOARD_BRANCH}")" || die "can't list origin's branches"
+  if [[ -n "${remote_has}" ]]; then
+    retry git fetch --quiet origin "${ONBOARD_BRANCH}" || die "can't fetch origin"
+    if git diff --quiet HEAD "origin/${ONBOARD_BRANCH}" -- 2> /dev/null; then
+      skip "${ONBOARD_BRANCH} already on origin with these files; reusing it"
+      git reset --quiet --hard "origin/${DEFAULT}"
+    else
+      git reset --quiet --soft "origin/${DEFAULT}"
+      die "origin already has a ${ONBOARD_BRANCH} branch with other content. Delete it (git push origin --delete ${ONBOARD_BRANCH}) if it's an old attempt, then re-run apply. Your files are staged, nothing is lost."
+    fi
+  else
+    git branch -f "${ONBOARD_BRANCH}" HEAD
+    git reset --quiet --hard "origin/${DEFAULT}"      # drops only the commit made above; it's on the branch
+    git switch --quiet "${ONBOARD_BRANCH}"
+    git push --quiet -u origin "${ONBOARD_BRANCH}" || { git switch --quiet "${DEFAULT}"; die "pushing ${ONBOARD_BRANCH} failed"; }
+    git switch --quiet "${DEFAULT}"
+  fi
+  pr="$(gh pr create --base "${DEFAULT}" --head "${ONBOARD_BRANCH}" --title "${ONBOARD_SUBJECT}" \
+          --body "Opened by ci-workflows' local/bin/onboard. Merge it by re-running \`onboard apply\` once its checks are green: it merges the PR, then tags the starting version and creates the environments and rulesets.")" \
+    || die "opening the PR failed"
+  done_ "${pr}"
+  echo
+  echo "${BOLD}Next:${OFF} when its checks are green (${GREY}gh pr checks ${ONBOARD_BRANCH}${OFF}), run ${GREY}onboard apply${OFF} again."
+  exit 0
 }
 
 apply() {
-  local b pr st
-  # Second run on a protected main: merge the onboarding PR, then carry on.
-  pr="$(gh pr list --head "${ONBOARD_BRANCH}" --state open --json number --jq '.[0].number // empty')"
-  if [[ -n "${pr}" ]]; then
-    say "onboarding PR #${pr}"
-    st="$(gh pr view "${pr}" --json mergeStateStatus --jq .mergeStateStatus)"
-    [[ "${st}" =~ ^(CLEAN|HAS_HOOKS|UNSTABLE)$ ]] \
-      || die "PR #${pr} can't be merged yet (${st}). Check it with: gh pr checks ${pr}"
-    # The skip marker goes on the merge commit only: it adds the merge trigger,
-    # which would otherwise deploy it. The PR's own commit has none, or its
-    # checks wouldn't run.
-    gh pr merge "${pr}" --squash --delete-branch \
-      --subject "ci: onboard to ci-workflows (#${pr}) [skip ci]" --body "" > /dev/null \
-      || die "merging PR #${pr} failed"
-    git switch --quiet main && git pull --quiet --ff-only origin main || die "can't update main after the merge"
-    done_ "merged: $(git log --oneline -1)"
+  local b pr
+  # A later run on a protected branch: deal with the onboarding PR first.
+  pr="$(retry gh pr list --head "${ONBOARD_BRANCH}" --base "${DEFAULT}" --state open --json number --jq '.[0].number // empty')" \
+    || die "can't list the open PRs from GitHub (the error is above)"
+  [[ -n "${pr}" ]] && handle_onboarding_pr "${pr}"
+
+  say "branch"
+  [[ "$(git branch --show-current)" == "${DEFAULT}" ]] || die "switch to ${DEFAULT} first"
+  retry git fetch --quiet origin "${DEFAULT}" --tags || die "can't fetch origin"
+  [[ "$(git rev-parse HEAD)" == "$(git rev-parse "origin/${DEFAULT}")" ]] || die "${DEFAULT} isn't at origin/${DEFAULT}; pull or push first"
+  done_ "on ${DEFAULT} at origin/${DEFAULT}"
+  # The main ruleset requires linear history, which a merge commit breaks: with
+  # only merge commits allowed, no PR could ever merge once it exists.
+  local allowed; allowed="$(merge_method)" || exit 1
+  case "${allowed}" in
+    "")    die "the repo allows no merge method. Allow squash or rebase merging (Settings → General → Pull Requests), then re-run." ;;
+    merge) die "the repo allows only merge commits, and the main ruleset requires linear history, so no PR could merge. Allow squash or rebase merging (Settings → General → Pull Requests), then re-run." ;;
+  esac
+
+  # An earlier run opened a PR that was closed unmerged, and the files are no
+  # longer in this checkout: take them from the branch it left on origin.
+  local earlier=""
+  if [[ ! -f "${MANIFEST}" ]]; then
+    earlier="$(retry git ls-remote --heads origin "${ONBOARD_BRANCH}")" || die "can't list origin's branches"
+  fi
+  if [[ -n "${earlier}" ]]; then
+    retry git fetch --quiet origin "${ONBOARD_BRANCH}" || die "can't fetch origin"
+    if git cat-file -e "origin/${ONBOARD_BRANCH}:${MANIFEST}" 2> /dev/null; then
+      say "earlier onboarding branch"
+      done_ "${ONBOARD_BRANCH} is on origin from an earlier run; reopening its PR"
+      push_blocked || warn "${DEFAULT} isn't protected now; merging the branch through a PR anyway"
+      pr="$(gh pr create --base "${DEFAULT}" --head "${ONBOARD_BRANCH}" --title "${ONBOARD_SUBJECT}" \
+              --body "Reopened by ci-workflows' local/bin/onboard. Re-run \`onboard apply\` once its checks are green.")" || die "opening the PR failed"
+      done_ "${pr}"
+      echo
+      echo "${BOLD}Next:${OFF} when its checks are green, run ${GREY}onboard apply${OFF} again."
+      exit 0
+    fi
   fi
 
   say "manifest"
@@ -241,12 +565,6 @@ apply() {
           or (.target | test("^(app-service|function|container|package)$") | not)) | .name' "${MANIFEST}")"
   [[ -z "$b" ]] || die "bad runtime or target on: $b"
   done_ "components: $(yq '[.components[].name] | join(", ")' "${MANIFEST}")"
-
-  say "branch"
-  [[ "$(git branch --show-current)" == main ]] || die "switch to main first"
-  git fetch --quiet origin main --tags || die "can't fetch origin"
-  [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || die "main isn't at origin/main; pull or push first"
-  done_ "on main at origin/main"
 
   say "bin/ci"
   bash bin/ci || die "bin/ci failed. Fix that first: the PR gate needs it green."
@@ -262,45 +580,36 @@ apply() {
   if git diff --cached --quiet; then
     skip "nothing new to commit"
   else
-    # [skip ci]: this commit adds the merge trigger, which would otherwise deploy it.
-    git commit --quiet -m "ci: onboard to ci-workflows [skip ci]" || die "commit failed"
-    if git push --quiet origin main 2> /dev/null; then
-      done_ "$(git log --oneline -1)"
-    else
-      # main is protected. Move the commit to a branch, without the skip
-      # marker so the PR's checks run, and open a PR for it.
-      warn "main is protected; opening a pull request instead"
-      git branch -f "${ONBOARD_BRANCH}" HEAD
-      git reset --quiet --hard origin/main      # drops only the commit made above
-      git switch --quiet "${ONBOARD_BRANCH}"
-      git commit --quiet --amend -m "ci: onboard to ci-workflows"
-      git push --quiet -u origin "${ONBOARD_BRANCH}" || { git switch --quiet main; die "pushing ${ONBOARD_BRANCH} failed"; }
-      pr="$(gh pr create --base main --head "${ONBOARD_BRANCH}" --title "ci: onboard to ci-workflows" \
-              --body "Opened by ci-workflows' local/bin/onboard. Merge it by re-running \`onboard apply\` once its checks are green: that squash-merges it so the merge doesn't deploy, then tags the starting version and creates the environments and rulesets.")" \
-        || { git switch --quiet main; die "opening the PR failed"; }
-      git switch --quiet main
-      done_ "${pr}"
-      echo
-      echo "${BOLD}Next:${OFF} when its checks are green (${GREY}gh pr checks ${ONBOARD_BRANCH}${OFF}), run ${GREY}onboard apply${OFF} again."
-      exit 0
+    # The merge trigger skips commits with this subject, so landing the
+    # trigger doesn't deploy. Nothing else is skipped: the PR checks run.
+    git commit --quiet -m "${ONBOARD_SUBJECT}" || die "commit failed"
+    if push_blocked; then
+      warn "${DEFAULT} only takes changes through pull requests; opening one"
+      open_onboarding_pr
     fi
+    git push --quiet origin "${DEFAULT}" || { git reset --quiet --soft "origin/${DEFAULT}"; die "pushing to ${DEFAULT} failed (see git's message above). Your files are staged, nothing is lost."; }
+    done_ "$(git log --oneline -1)"
   fi
 
   say "starting tag"
-  if [[ -n "$(git ls-remote --tags origin 'refs/tags/v[0-9]*')" ]]; then
+  local tags; tags="$(retry git ls-remote --tags origin 'refs/tags/v[0-9]*')" || die "can't list origin's tags"
+  if [[ -n "${tags}" ]]; then
     skip "a v* tag exists; versions continue from it"
   else
-    git tag -a v0.1.0 -m "starting point" && git push --quiet origin v0.1.0 && done_ "v0.1.0 at $(git rev-parse --short HEAD)"
+    # -f: a run whose push failed left the tag here, maybe on another commit.
+    git tag -f -a v0.1.0 -m "starting point" > /dev/null || die "can't tag v0.1.0"
+    retry git push --quiet --no-verify origin v0.1.0 || die "pushing v0.1.0 failed (see git's message above); re-run apply"
+    done_ "v0.1.0 at $(git rev-parse --short HEAD)"
   fi
 
   say "environments"
-  local rid; rid="$(gh api "users/${REVIEWER}" --jq .id)" || die "no GitHub user ${REVIEWER}"
+  local rv; rv="$(reviewers_json)" || exit 1
   ensure_environment test
-  ensure_environment release "${rid}"
+  ensure_environment release "${rv}"
   ensure_environment production
 
   say "rulesets"
-  local excl="\"refs/heads/main\"" ctx="" p c
+  local excl="\"refs/heads/${DEFAULT}\"" ctx="" p c
   for p in "${PREFIXES[@]}"; do excl+=",\"refs/heads/${p}/**\""; done
   for c in "${CHECKS[@]}"; do
     [[ "$c" == local/* ]] && ctx+="{\"context\":\"$c\"}," || ctx+="{\"context\":\"$c\",\"integration_id\":${GITHUB_ACTIONS_APP}},"
@@ -320,75 +629,164 @@ apply() {
 
 # --------------------------------------------------------------- check ----
 
-FAILS=0
+FAILS=0; LIMITS=0
 ok()  { printf '%s\n' "  ${GREEN}✓${OFF} $*"; }
 bad() { printf '%s\n' "  ${RED}✗${OFF} $*"; FAILS=$((FAILS + 1)); }
+lim() { printf '%s\n' "  ${YELLOW}!${OFF} $*"; LIMITS=$((LIMITS + 1)); }
 is()  { [[ "$2" == "$3" ]] && ok "$1" || bad "$1: got '${2}', want '${3}'"; }
 
-check() {
-  local f mode want got id
-  git fetch --quiet origin main --tags 2> /dev/null
+# GitHub's reason for refusing a read, if it's the plan or visibility.
+plan_refusal() {           # path
+  gh_read "$1" > /dev/null && return 1
+  grep -oiE '"message":"[^"]*(upgrade|plan|not available)[^"]*' "${GH_BODYF}" | sed 's/"message":"//' | head -1
+}
 
-  say "files on origin/main"
+check() {
+  local f mode want got id info vis owner_type why
+  retry git fetch --quiet origin "${DEFAULT}" --tags 2> /dev/null || die "can't fetch ${DEFAULT} from origin; check your connection and re-run"
+  info="$(gh_read "repos/${REPO}" --jq '"\(.visibility) \(.owner.type) \(.allow_squash_merge) \(.allow_rebase_merge) \(.allow_merge_commit)"')" \
+    || die "can't read ${REPO} from GitHub: $(gh_err)"
+  read -r vis owner_type sq rb mc <<< "${info}"
+
+  say "files on origin/${DEFAULT}"
   for f in "${TRIGGERS[@]}"; do
-    git cat-file -e "origin/main:.github/workflows/$f" 2> /dev/null && ok "$f" || bad "$f missing"
+    if ! git cat-file -e "origin/${DEFAULT}:.github/workflows/$f" 2> /dev/null; then bad "$f missing"
+    elif render_trigger "$f" | cmp -s - <(git show "origin/${DEFAULT}:.github/workflows/$f"); then ok "$f"
+    else
+      git show "origin/${DEFAULT}:.github/workflows/$f" | grep -q "ci-workflows/.github/workflows/" \
+        && warn "$f differs from examples/ (branch ${DEFAULT}, @${REF}): diff <(git show origin/${DEFAULT}:.github/workflows/$f) <(${CIW}/local/bin/onboard ...)" \
+        || bad "$f exists but doesn't call ci-workflows; it was there before onboarding. Replace it with examples/.github/workflows/$f"
+    fi
   done
-  git cat-file -e "origin/main:${MANIFEST}" 2> /dev/null && ok "${MANIFEST}" || bad "${MANIFEST} missing"
+  git cat-file -e "origin/${DEFAULT}:${MANIFEST}" 2> /dev/null && ok "${MANIFEST}" || bad "${MANIFEST} missing"
   for f in "${GATE_FILES[@]}"; do
-    mode="$(git ls-tree origin/main -- "$f" | cut -d' ' -f1)"
+    mode="$(git ls-tree "origin/${DEFAULT}" -- "$f" | cut -d' ' -f1)"
     is "$f mode" "${mode}" 100755
-    if [[ -n "${mode}" ]] && ! git show "origin/main:$f" | cmp -s - "${CIW}/local/${f/.githooks/githooks}"; then
+    if [[ -n "${mode}" ]] && ! git show "origin/${DEFAULT}:$f" | cmp -s - <(tr -d '\r' < "${CIW}/local/${f/.githooks/githooks}"); then
       bad "$f differs from ci-workflows' copy; re-run onboard init, commit it"
     fi
   done
   is "core.hooksPath" "$(git config core.hooksPath)" .githooks
 
   say "starting tag"
-  got="$(git ls-remote --tags origin 'refs/tags/v[0-9]*' | grep -c -v '\^{}')"
-  [[ "${got}" -gt 0 ]] && ok "${got} v* tag(s)" || bad "no v* tag: every merge would build 0.1.0-alpha.0"
+  if ! got="$(retry git ls-remote --tags origin 'refs/tags/v[0-9]*')"; then bad "couldn't list origin's tags"
+  else
+    got="$(grep -c -v '\^{}' <<< "${got}")"
+    [[ "${got}" -gt 0 ]] && ok "${got} v* tag(s)" || bad "no v* tag: every merge would build 0.1.0-alpha.0"
+  fi
+
+  say "actions"
+  got="$(gh_get "repos/${REPO}/actions/permissions" --jq '"\(.enabled) \(.allowed_actions)"')"
+  case "${got}" in
+    "true all") ok "Actions enabled, all actions allowed" ;;
+    "true selected")
+      local allowed; allowed="$(gh_read "repos/${REPO}/actions/permissions/selected-actions" --jq '.patterns_allowed[]')"
+      if [[ $? == 2 ]]; then
+        bad "couldn't read the Actions allow-list from GitHub: $(gh_err)"
+      elif grep -qE '^Haam909/ci-workflows(/\*|@\*|/\*@\*)?$|^Haam909/\*$' <<< "${allowed}"; then
+        ok "Actions enabled; Haam909/ci-workflows is on the allow-list"
+      else
+        bad "Actions allow-list doesn't include Haam909/ci-workflows/*: every workflow would fail to start"
+      fi ;;
+    "true local_only") bad "Actions are limited to this repo's own actions: the triggers can't call Haam909/ci-workflows" ;;
+    "false "*) bad "Actions are disabled on this repo" ;;
+    *) warn "can't read the Actions settings (${got:-no access})" ;;
+  esac
 
   say "environments"
   for f in test release production; do
-    got="$(gh api "repos/${REPO}/environments/$f" --jq '[.protection_rules[].type] | join(",")' 2> /dev/null)" \
-      || { bad "environment $f missing"; continue; }
+    got="$(gh_read "repos/${REPO}/environments/$f" --jq '[.protection_rules[].type] | join(",")')"
+    case $? in
+      2) bad "couldn't read environment $f from GitHub: $(gh_err)"; continue ;;
+      1) if [[ "${vis}" == private && "${owner_type}" == User ]]; then lim "environment $f missing: GitHub offers environments on private repos only with Pro or Team"
+         else bad "environment $f missing"; fi
+         continue ;;
+    esac
     if [[ "$f" == release ]]; then
-      [[ "${got}" == *required_reviewers* ]] && ok "release has required reviewers" || bad "release has no required reviewers"
+      if [[ "${got}" == *required_reviewers* ]]; then
+        ok "release has required reviewers: $(gh_get "repos/${REPO}/environments/release" --jq '[.protection_rules[] | select(.type=="required_reviewers") | .reviewers[] | "\(.type):\(.reviewer.login // .reviewer.slug)"] | join(", ")')"
+      elif [[ "${vis}" == private ]]; then lim "release has no required reviewers; on this plan a private repo can't have them, so releases don't pause for approval"
+      else bad "release has no required reviewers"; fi
     else
       ok "environment $f"
     fi
   done
-  if [[ "$(gh api "repos/${REPO}" --jq '"\(.private) \(.owner.type)"')" == "true User" ]]; then
-    warn "private repo on a personal account: release won't pause for approval (SETUP-GITHUB.md step 7)"
+
+  say "branch protection on ${DEFAULT}"
+  # Read everything first: a verdict drawn from a read that failed would
+  # report a bad moment on GitHub as protection that's missing.
+  : > "${GH_FAILF}"
+  local rules req strict cp bn_id main_id bn_ex bn_inc bn_rules bn_enf main_inc main_enf
+  rules="$(effective_rules)"
+  why="$(plan_refusal "repos/${REPO}/rulesets")"
+  bn_id="$(gh_get "repos/${REPO}/rulesets" --jq '.[] | select(.name=="branch naming") | .id')"
+  if [[ -n "${bn_id}" ]]; then
+    bn_ex="$(gh_get "repos/${REPO}/rulesets/${bn_id}" --jq '[.conditions.ref_name.exclude[]] | sort | join(",")')"
+    bn_inc="$(gh_get "repos/${REPO}/rulesets/${bn_id}" --jq '.conditions.ref_name.include | join(",")')"
+    bn_rules="$(gh_get "repos/${REPO}/rulesets/${bn_id}" --jq '[.rules[].type] | join(",")')"
+    bn_enf="$(gh_get "repos/${REPO}/rulesets/${bn_id}" --jq .enforcement)"
+  fi
+  main_id="$(gh_get "repos/${REPO}/rulesets" --jq '.[] | select(.name=="main") | .id')"
+  if [[ -n "${main_id}" ]]; then
+    main_inc="$(gh_get "repos/${REPO}/rulesets/${main_id}" --jq '.conditions.ref_name.include | join(",")')"
+    main_enf="$(gh_get "repos/${REPO}/rulesets/${main_id}" --jq .enforcement)"
+  fi
+  req="$(required_checks)"
+  strict="$(gh_get "repos/${REPO}/rules/branches/${DEFAULT}" --jq '[.[] | select(.type=="required_status_checks") | .parameters.strict_required_status_checks_policy] | any')"
+  cp="$(classic_protection)"
+  local unread; unread="$(head -1 "${GH_FAILF}")"
+  if [[ -n "${unread}" ]]; then
+    bad "couldn't read the branch protection on ${DEFAULT} from GitHub (${unread}); nothing about it is checked. Re-run onboard check"
+  else
+    if [[ -n "${why}" ]]; then
+      lim "rulesets unavailable here: ${why}"
+    fi
+    if [[ -z "${bn_id}" ]]; then [[ -n "${why}" ]] || bad "ruleset 'branch naming' missing"; else
+      want="refs/heads/${DEFAULT}"; for f in "${PREFIXES[@]}"; do want+=",refs/heads/$f/**"; done
+      want="$(tr ',' '\n' <<< "${want}" | sort | paste -sd, -)"
+      is "branch naming: ${#PREFIXES[@]} prefixes + ${DEFAULT} excluded" "${bn_ex}" "${want}"
+      is "branch naming: includes" "${bn_inc}" "~ALL"
+      is "branch naming: rules" "${bn_rules}" creation
+      is "branch naming: enforcement" "${bn_enf}" active
+    fi
+    if [[ -z "${main_id}" ]]; then [[ -n "${why}" ]] || bad "ruleset 'main' missing"; else
+      is "main: targets the default branch" "${main_inc}" "~DEFAULT_BRANCH"
+      is "main: enforcement" "${main_enf}" active
+    fi
+    # What is actually in effect, from every source.
+    for f in pull_request required_linear_history required_status_checks; do
+      grep -qx "$f" <<< "${rules}" && ok "in effect: $f" || { [[ -n "${why}" ]] && lim "not in effect: $f (rulesets unavailable)" || bad "not in effect on ${DEFAULT}: $f"; }
+    done
+    for f in "${CHECKS[@]}"; do
+      grep -qxF "$f" <<< "${req}" && ok "required: $f" || { [[ -n "${why}" ]] && lim "not required: $f (rulesets unavailable)" || bad "not a required check: $f"; }
+    done
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      printf '%s\n' "${CHECKS[@]}" | grep -qxF "$f" || warn "required check '$f' isn't posted by ci-workflows: every PR waits on it until something else reports it"
+    done <<< "${req}"
+    if [[ "${strict}" == true ]] || jq -e '.required_status_checks.strict' <<< "${cp}" > /dev/null 2>&1; then
+      ok "branches must be up to date before merging"
+    elif [[ -n "${why}" ]]; then
+      lim "branches needn't be up to date before merging (rulesets unavailable); the PR gate still fails a stale branch"
+    else
+      bad "branches needn't be up to date before merging (strict required checks is off)"
+    fi
+    [[ -n "${cp}" ]] && warn "classic branch protection is also on ${DEFAULT}; its rules apply on top of the rulesets"
   fi
 
-  say "rulesets"
-  id="$(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.name=="branch naming") | .id')"
-  if [[ -z "${id}" ]]; then bad "ruleset 'branch naming' missing"; else
-    want="refs/heads/main"; for f in "${PREFIXES[@]}"; do want+=",refs/heads/$f/**"; done
-    want="$(tr ',' '\n' <<< "${want}" | sort | paste -sd, -)"
-    got="$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.conditions.ref_name.exclude[]] | sort | join(",")')"
-    is "branch naming: ${#PREFIXES[@]} prefixes + main excluded" "${got}" "${want}"
-    is "branch naming: includes" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~ALL"
-    is "branch naming: rules" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.rules[].type] | join(",")')" creation
-    is "branch naming: enforcement" "$(gh api "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
-  fi
-  id="$(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.name=="main") | .id')"
-  if [[ -z "${id}" ]]; then bad "ruleset 'main' missing"; else
-    got="$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.rules[].type] | sort | join(",")')"
-    for f in pull_request required_linear_history required_status_checks; do
-      [[ ",${got}," == *",$f,"* ]] && ok "main: $f" || bad "main: no $f rule"
-    done
-    want="$(printf '%s\n' "${CHECKS[@]}" | sort | paste -sd, -)"
-    is "main: required checks" \
-      "$(gh api "repos/${REPO}/rulesets/${id}" --jq '[.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context] | sort | join(",")')" "${want}"
-    is "main: up to date before merging" \
-      "$(gh api "repos/${REPO}/rulesets/${id}" --jq '.rules[] | select(.type=="required_status_checks") | .parameters.strict_required_status_checks_policy')" true
-    is "main: targets the default branch" "$(gh api "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~DEFAULT_BRANCH"
-    is "main: enforcement" "$(gh api "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
+  say "merging"
+  if [[ -z "${unread}" ]] && grep -qx required_linear_history <<< "${rules}" && [[ "${sq}" != true && "${rb}" != true ]]; then
+    bad "no PR can merge: linear history is required but only merge commits are allowed. Allow squash or rebase merging (Settings → General → Pull Requests)"
+  elif [[ "${sq}" != true && "${rb}" != true && "${mc}" != true ]]; then
+    bad "the repo allows no merge method"
+  else
+    ok "merge methods: $( [[ ${sq} == true ]] && printf 'squash ')$( [[ ${rb} == true ]] && printf 'rebase ')$( [[ ${mc} == true ]] && printf 'merge')"
   fi
 
   echo
-  if [[ "${FAILS}" -eq 0 ]]; then echo "${GREEN}Onboarded: everything checks out.${OFF}"
+  if [[ "${FAILS}" -eq 0 ]]; then
+    echo "${GREEN}Onboarded: everything checks out.${OFF}"
+    [[ "${LIMITS}" -eq 0 ]] || echo "${YELLOW}${LIMITS} thing(s) this repo's plan or visibility doesn't offer (marked !).${OFF}"
   else echo "${RED}${FAILS} problem(s).${OFF}"; exit 1; fi
 }
 
@@ -396,8 +794,8 @@ check() {
 
 if [[ "${CMD}" != init ]]; then
   command -v gh > /dev/null || die "gh is required"
-  REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" || die "gh can't see this repo"
-  [[ -n "${REVIEWER}" ]] || REVIEWER="$(gh api user --jq .login)"
+  command -v jq > /dev/null || die "jq is required"
+  REPO="$(retry gh repo view --json nameWithOwner --jq .nameWithOwner)" || die "gh can't see this repo (or can't reach GitHub; the error is above)"
 fi
 
 case "${CMD}" in

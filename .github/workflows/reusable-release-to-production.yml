@@ -25,7 +25,8 @@ on:
         default: false
       sha:
         description: >-
-          Commit to release. Any ancestor of main newer than the last release.
+          Commit to release. Any ancestor of the default branch newer than the
+          last release.
           Blank releases the commit currently live in test.
         type: string
         default: ''
@@ -38,6 +39,12 @@ on:
       python-version:
         type: string
         default: '3.12'
+      sign-private-to-public-log:
+        description: >-
+          Sign a private or internal repo's assets with cosign anyway. Keyless
+          signing records the repo's name in Sigstore's public log.
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -65,13 +72,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_SHA: ${{ inputs.sha }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           SHA=""; CREATED=""
 
           if [[ -n "${INPUT_SHA}" ]]; then
             # Chosen by a person. Sign-off happens outside CI, so the only
-            # requirement is that it is on main.
+            # requirement is that it is on the default branch.
             SHA="$(git rev-parse --verify --quiet "${INPUT_SHA}^{commit}")" \
               || { echo "::error::${INPUT_SHA} is not a commit in this repository."; exit 1; }
             SOURCE="chosen"
@@ -88,21 +96,21 @@ jobs:
             SOURCE="live in test"
           fi
 
-          git merge-base --is-ancestor "${SHA}" origin/main \
-            || { echo "::error::${SHA} is not an ancestor of main."; exit 1; }
+          git merge-base --is-ancestor "${SHA}" "origin/${DEFAULT}" \
+            || { echo "::error::${SHA} is not an ancestor of ${DEFAULT}."; exit 1; }
 
           # Versions only move forward: the commit must contain the latest
           # release. A commit at or behind it would derive a version that
           # already exists; one on a branch that forked before it (and merged
           # after) would ship without that release's changes.
-          LATEST="$(git describe --tags --abbrev=0 --match 'v[0-9]*' origin/main 2>/dev/null || true)"
+          LATEST="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "origin/${DEFAULT}" 2>/dev/null || true)"
           if [[ -n "${LATEST}" ]]; then
             if git merge-base --is-ancestor "${SHA}" "${LATEST}"; then
               echo "::error::${SHA:0:7} is already included in ${LATEST}. Choose a commit after it."
               exit 1
             fi
             if ! git merge-base --is-ancestor "${LATEST}" "${SHA}"; then
-              echo "::error::${SHA:0:7} does not contain ${LATEST}: it branched off before that release. Choose a commit on main after it."
+              echo "::error::${SHA:0:7} does not contain ${LATEST}: it branched off before that release. Choose a commit on ${DEFAULT} after it."
               exit 1
             fi
           fi
@@ -116,7 +124,7 @@ jobs:
           echo "source=${SOURCE}" >> "$GITHUB_OUTPUT"
           echo "Releasing ${SHA} (${SOURCE})"
 
-      # The checkout above is the dispatch ref (main's head). A chosen older
+      # The checkout above is the dispatch ref (the default branch's head). A chosen older
       # commit must be built from its own manifest, so read it from that commit.
       - id: read
         env:
@@ -199,9 +207,15 @@ jobs:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ needs.resolve.outputs.version }}
 
+      # cosign's keyless signing writes the signing certificate, which names
+      # this repo and workflow, to Sigstore's public transparency log. That is
+      # fine for a public repo and a leak for a private one, so a private repo
+      # signs only if it opts in. GitHub's attestation (next) covers it there.
       - uses: sigstore/cosign-installer@v3
+        if: github.event.repository.visibility == 'public' || inputs.sign-private-to-public-log
 
       - name: Sign
+        if: github.event.repository.visibility == 'public' || inputs.sign-private-to-public-log
         env:
           IMAGE: ${{ steps.build.outputs.artifact }}
         run: |
@@ -216,14 +230,33 @@ jobs:
             cosign sign-blob --yes "$f" --bundle "${f}.cosign.bundle"
           done
 
+      # Attestations work in public repos on every plan, and in private ones
+      # only on GitHub Enterprise Cloud. A private repo elsewhere gets a
+      # warning instead of a failed release.
       - uses: actions/attest-build-provenance@v2
+        id: attest
         if: matrix.component.target != 'container'
+        continue-on-error: ${{ github.event.repository.visibility != 'public' }}
         with:
           subject-path: |
             _artifacts/*.zip
             _artifacts/*.nupkg
             _artifacts/*.tgz
             _artifacts/*.whl
+
+      - name: Note what wasn't signed
+        if: steps.attest.outcome == 'failure' || (github.event.repository.visibility != 'public' && !inputs.sign-private-to-public-log)
+        env:
+          ATTEST: ${{ steps.attest.outcome }}
+        run: |
+          {
+            echo "### ${{ matrix.component.name }}: provenance"
+            [[ "${ATTEST}" == failure ]] && echo "- No attestation: GitHub offers them on private repos only with Enterprise Cloud."
+            [[ "${{ github.event.repository.visibility }}" != public && "${{ inputs.sign-private-to-public-log }}" != true ]] \
+              && echo "- No cosign bundles: this repo is ${{ github.event.repository.visibility }}, and they'd publish its name to Sigstore's public log (input sign-private-to-public-log)."
+            echo "- SHA256SUMS in the release still covers every asset."
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ "${ATTEST}" == failure ]] && echo "::warning::${{ matrix.component.name }}: no attestation (private repo without Enterprise Cloud)" || true
 
       - name: Record image reference
         if: matrix.component.target == 'container'
@@ -277,7 +310,7 @@ jobs:
     needs: [resolve, publish]
     runs-on: ubuntu-latest
     # deployment: false stops GitHub recording this job against the commit the
-    # run was dispatched from (main's head), which isn't the commit being
+    # run was dispatched from (the default branch's head), which isn't the commit being
     # shipped when a sha is chosen. The steps below record the real one.
     environment:
       name: production

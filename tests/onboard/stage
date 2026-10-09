@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# tests/onboard/stage — publish this checkout's HEAD as a ref the sandboxes can
+# call, so a change is tested end to end before v1 moves.
+#
+#   tests/onboard/stage           pushes test/stage-<sha>, prints the ref
+#   tests/onboard/stage --delete  removes every test/stage-* branch
+#
+# The reusable workflows call this repo's actions at @v1; on the staged branch
+# those references point at the branch itself, in one extra commit that never
+# reaches main. Run the matrix with CIW_REF=<printed ref>.
+
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+if [[ "${1:-}" == --delete ]]; then
+  git ls-remote --heads origin 'test/stage-*' | awk '{print $2}' | sed 's#refs/heads/##' \
+    | while read -r b; do git push --quiet origin --delete "$b" && echo "deleted $b"; done
+  exit 0
+fi
+
+[[ -z "$(git status --porcelain --untracked-files=no)" ]] || { echo "commit or stash your changes first: the staged ref is HEAD" >&2; exit 1; }
+SHA="$(git rev-parse --short HEAD)"
+REF="test/stage-${SHA}"
+TMP="$(mktemp -d)"
+trap 'git worktree remove --force "${TMP}" > /dev/null 2>&1 || true' EXIT
+
+git worktree add --quiet --detach "${TMP}" HEAD
+(
+  cd "${TMP}"
+  grep -rl 'Haam909/ci-workflows/actions/[a-z-]*@v1' .github/workflows actions \
+    | xargs sed -i "s#\(Haam909/ci-workflows/actions/[a-z-]*\)@v1#\1@${REF}#g"
+  git commit --quiet -am "stage ${SHA}: internal action refs at ${REF}"
+  git push --quiet --force origin "HEAD:refs/heads/${REF}"
+)
+echo "${REF}"
