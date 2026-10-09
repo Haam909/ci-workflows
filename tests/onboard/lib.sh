@@ -47,21 +47,43 @@ ensure_repo() {
 # Back to nothing: no protection, environments, releases, tags, PRs or extra
 # branches. The seed is force-pushed afterwards.
 reset_repo() {
-  local id b
-  for id in $(gh api "repos/${REPO}/rulesets" --jq '.[].id'); do gh api -X DELETE "repos/${REPO}/rulesets/${id}" > /dev/null; done
-  for b in $(gh api "repos/${REPO}/branches?per_page=100" --jq '.[] | select(.protected) | .name' 2> /dev/null); do
-    gh api -X DELETE "repos/${REPO}/branches/${b}/protection" > /dev/null 2>&1
+  local id b try left=""
+  # A call GitHub fails in a bad moment deletes nothing and says nothing, and
+  # what's left leaks into the next row (an earlier row's v0.1.0 made L1
+  # release 0.1.0 again). Delete, then check nothing is left; repeat.
+  for try in 1 2 3; do
+    for id in $(gh api "repos/${REPO}/rulesets" --jq '.[].id' 2> /dev/null); do gh api -X DELETE "repos/${REPO}/rulesets/${id}" > /dev/null 2>&1; done
+    for b in $(gh api "repos/${REPO}/branches?per_page=100" --jq '.[] | select(.protected) | .name' 2> /dev/null); do
+      gh api -X DELETE "repos/${REPO}/branches/${b}/protection" > /dev/null 2>&1
+    done
+    for id in $(gh api "repos/${REPO}/environments" --jq '.environments[].name' 2> /dev/null); do gh api -X DELETE "repos/${REPO}/environments/${id}" > /dev/null 2>&1; done
+    for id in $(gh api "repos/${REPO}/releases?per_page=100" --jq '.[].id' 2> /dev/null); do gh api -X DELETE "repos/${REPO}/releases/${id}" > /dev/null 2>&1; done
+    for id in $(gh api "repos/${REPO}/git/matching-refs/tags" --jq '.[].ref' 2> /dev/null); do gh api -X DELETE "repos/${REPO}/git/${id}" > /dev/null 2>&1; done
+    for id in $(gh pr list -R "${REPO}" --state open --json number --jq '.[].number' 2> /dev/null); do gh pr close -R "${REPO}" "${id}" > /dev/null 2>&1; done
+    if left="$(sandbox_leftovers)"; then [[ -z "${left}" ]] && break; else left="GitHub didn't say what's left"; fi
+    sleep 10
   done
-  for id in $(gh api "repos/${REPO}/environments" --jq '.environments[].name' 2> /dev/null); do gh api -X DELETE "repos/${REPO}/environments/${id}" > /dev/null; done
-  for id in $(gh api "repos/${REPO}/releases?per_page=100" --jq '.[].id'); do gh api -X DELETE "repos/${REPO}/releases/${id}" > /dev/null; done
-  for id in $(gh api "repos/${REPO}/git/matching-refs/tags" --jq '.[].ref' 2> /dev/null); do gh api -X DELETE "repos/${REPO}/git/${id}" > /dev/null; done
-  for id in $(gh pr list -R "${REPO}" --state open --json number --jq '.[].number'); do gh pr close -R "${REPO}" "${id}" > /dev/null; done
+  [[ -z "${left}" ]] || { infra "sandbox reset incomplete: ${left}"; return 1; }
   gh api -X PATCH "repos/${REPO}" -F allow_squash_merge=true -F allow_rebase_merge=true -F allow_merge_commit=true \
     -F delete_branch_on_merge=false > /dev/null
   # Sandboxes never change visibility: GitHub refuses git access ("Your
   # repository is disabled") for a while after a change.
   local vis; vis="$(gh api "repos/${REPO}" --jq .visibility)"
   [[ "${vis}" == "${VIS}" ]] || { fail "${REPO} is ${vis}, the row needs ${VIS}; sandboxes keep the visibility they were created with"; return 1; }
+}
+
+# What a reset should have removed, or a failure if GitHub can't say.
+sandbox_leftovers() {
+  local n out=""
+  if ! n="$(gh api "repos/${REPO}/rulesets" --jq length 2> /dev/null)"; then
+    [[ "${VIS}" == private ]] || return 1; n=0      # a personal plan has no rulesets on private repos
+  fi
+  [[ "${n}" == 0 ]] || out+="${n} ruleset(s) "
+  n="$(gh api "repos/${REPO}/environments" --jq .total_count 2> /dev/null)" || return 1; [[ "${n}" == 0 ]] || out+="${n} environment(s) "
+  n="$(gh api "repos/${REPO}/releases?per_page=100" --jq length 2> /dev/null)" || return 1; [[ "${n}" == 0 ]] || out+="${n} release(s) "
+  n="$(gh api "repos/${REPO}/git/matching-refs/tags" --jq length 2> /dev/null)" || return 1; [[ "${n}" == 0 ]] || out+="${n} tag(s) "
+  n="$(gh pr list -R "${REPO}" --state open --json number --jq length 2> /dev/null)" || return 1; [[ "${n}" == 0 ]] || out+="${n} open PR(s) "
+  printf '%s' "${out}"
 }
 
 assemble_seed() {        # dir
@@ -296,9 +318,11 @@ checks_settled() {       # pr — the gate's three checks have all reported, non
   # checks are done: wait until it points at what origin has.
   read -r head name <<< "$(gh pr view "$1" -R "${REPO}" --json headRefOid,headRefName --jq '"\(.headRefOid) \(.headRefName)"' 2> /dev/null)"
   [[ -n "${head}" && "${head}" == "$(git ls-remote origin "refs/heads/${name}" 2> /dev/null | cut -f1)" ]] || return 1
-  s="$(gh pr checks "$1" -R "${REPO}" --json name,state 2> /dev/null)" || [[ -n "$s" ]] || return 1
+  # bucket sorts every state, queued and waiting ones included, into pending
+  # or a result; state alone let a gate that hadn't started count as done.
+  s="$(gh pr checks "$1" -R "${REPO}" --json name,bucket 2> /dev/null)" || [[ -n "$s" ]] || return 1
   jq -e '(["ci / gate", "ci / branch-name", "local/ci"] - [.[].name] | length == 0)
-         and all(.[]; .state != "PENDING" and .state != "QUEUED" and .state != "IN_PROGRESS")' <<< "$s" > /dev/null
+         and all(.[]; .bucket != "pending")' <<< "$s" > /dev/null
 }
 
 onboard_repo() {
@@ -382,7 +406,14 @@ feature_pr() {
   # branch without it.
   wait_for 120 "PR #${pr}'s merge commit" bash -c "[[ -n \"\$(gh pr view ${pr} -R '${REPO}' --json mergeCommit --jq '.mergeCommit.oid // empty')\" ]]" || return 1
   RELEASE_SHA="$(gh pr view "${pr}" -R "${REPO}" --json mergeCommit --jq .mergeCommit.oid)"
-  wait_for 120 "${RELEASE_SHA:0:7} on origin/${BRANCH}" bash -c "git fetch -q origin '${BRANCH}' && git merge-base --is-ancestor '${RELEASE_SHA}' 'origin/${BRANCH}'" || return 1
+  # Logged, so a timeout says whether the fetch failed or origin lacked the merge.
+  local end=$(( $(date +%s) + 300 ))
+  until logged git fetch -q origin "${BRANCH}" && git merge-base --is-ancestor "${RELEASE_SHA}" "origin/${BRANCH}"; do
+    if (( $(date +%s) >= end )); then
+      fail_step "merge ${RELEASE_SHA:0:7} not on origin/${BRANCH} after 300s (origin/${BRANCH} is at $(git rev-parse --short "origin/${BRANCH}"))"; return 1
+    fi
+    sleep 10
+  done
   git switch -q "${BRANCH}" && git pull -q --ff-only
   pass "feature PR merged by ${method}: $(git log --oneline -1 "${RELEASE_SHA}")"
 }
