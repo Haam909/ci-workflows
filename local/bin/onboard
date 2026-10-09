@@ -244,7 +244,7 @@ init() {
 # GitHub has bad moments (5xx, rate limits, no answer). A read retries those,
 # and tells "not there" (404) from "couldn't ask", so a bad moment is never
 # reported as something missing.
-GH_ERRF="$(mktemp)"; GH_BODYF="$(mktemp)"; trap 'rm -f "${GH_ERRF}" "${GH_BODYF}"' EXIT
+GH_ERRF="$(mktemp)"; GH_BODYF="$(mktemp)"; GH_FAILF="$(mktemp)"; trap 'rm -f "${GH_ERRF}" "${GH_BODYF}" "${GH_FAILF}"' EXIT
 gh_err() { head -1 "${GH_ERRF}"; }
 
 transient() {              # stderr-file body-file
@@ -272,7 +272,12 @@ gh_read() {
 # or nothing, and an error other than 404 is said on stderr.
 gh_get() {
   gh_read "$@"; local rc=$?
-  [[ ${rc} == 2 ]] && warn "couldn't read $1 from GitHub: $(gh_err)" >&2
+  # A plan or visibility refusal is an answer, not a failed read; check says
+  # what the plan doesn't offer.
+  if [[ ${rc} == 2 ]] && ! grep -qiE '"message":"[^"]*(upgrade|plan|not available)' "${GH_BODYF}"; then
+    warn "couldn't read $1 from GitHub: $(gh_err)" >&2
+    printf '%s: %s\n' "$1" "$(gh_err)" >> "${GH_FAILF}"
+  fi
   return ${rc}
 }
 
@@ -670,51 +675,69 @@ check() {
   done
 
   say "branch protection on ${DEFAULT}"
-  local rules; rules="$(effective_rules)"
+  # Read everything first: a verdict drawn from a read that failed would
+  # report a bad moment on GitHub as protection that's missing.
+  : > "${GH_FAILF}"
+  local rules req strict cp bn_id main_id bn_ex bn_inc bn_rules bn_enf main_inc main_enf
+  rules="$(effective_rules)"
   why="$(plan_refusal "repos/${REPO}/rulesets")"
-  if [[ -n "${why}" ]]; then
-    lim "rulesets unavailable here: ${why}"
+  bn_id="$(gh_get "repos/${REPO}/rulesets" --jq '.[] | select(.name=="branch naming") | .id')"
+  if [[ -n "${bn_id}" ]]; then
+    bn_ex="$(gh_get "repos/${REPO}/rulesets/${bn_id}" --jq '[.conditions.ref_name.exclude[]] | sort | join(",")')"
+    bn_inc="$(gh_get "repos/${REPO}/rulesets/${bn_id}" --jq '.conditions.ref_name.include | join(",")')"
+    bn_rules="$(gh_get "repos/${REPO}/rulesets/${bn_id}" --jq '[.rules[].type] | join(",")')"
+    bn_enf="$(gh_get "repos/${REPO}/rulesets/${bn_id}" --jq .enforcement)"
   fi
-  id="$(gh_get "repos/${REPO}/rulesets" --jq '.[] | select(.name=="branch naming") | .id')"
-  if [[ -z "${id}" ]]; then [[ -n "${why}" ]] || bad "ruleset 'branch naming' missing"; else
-    want="refs/heads/${DEFAULT}"; for f in "${PREFIXES[@]}"; do want+=",refs/heads/$f/**"; done
-    want="$(tr ',' '\n' <<< "${want}" | sort | paste -sd, -)"
-    got="$(gh_get "repos/${REPO}/rulesets/${id}" --jq '[.conditions.ref_name.exclude[]] | sort | join(",")')"
-    is "branch naming: ${#PREFIXES[@]} prefixes + ${DEFAULT} excluded" "${got}" "${want}"
-    is "branch naming: includes" "$(gh_get "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~ALL"
-    is "branch naming: rules" "$(gh_get "repos/${REPO}/rulesets/${id}" --jq '[.rules[].type] | join(",")')" creation
-    is "branch naming: enforcement" "$(gh_get "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
+  main_id="$(gh_get "repos/${REPO}/rulesets" --jq '.[] | select(.name=="main") | .id')"
+  if [[ -n "${main_id}" ]]; then
+    main_inc="$(gh_get "repos/${REPO}/rulesets/${main_id}" --jq '.conditions.ref_name.include | join(",")')"
+    main_enf="$(gh_get "repos/${REPO}/rulesets/${main_id}" --jq .enforcement)"
   fi
-  id="$(gh_get "repos/${REPO}/rulesets" --jq '.[] | select(.name=="main") | .id')"
-  if [[ -z "${id}" ]]; then [[ -n "${why}" ]] || bad "ruleset 'main' missing"; else
-    is "main: targets the default branch" "$(gh_get "repos/${REPO}/rulesets/${id}" --jq '.conditions.ref_name.include | join(",")')" "~DEFAULT_BRANCH"
-    is "main: enforcement" "$(gh_get "repos/${REPO}/rulesets/${id}" --jq .enforcement)" active
-  fi
-  # What is actually in effect, from every source.
-  for f in pull_request required_linear_history required_status_checks; do
-    grep -qx "$f" <<< "${rules}" && ok "in effect: $f" || { [[ -n "${why}" ]] && lim "not in effect: $f (rulesets unavailable)" || bad "not in effect on ${DEFAULT}: $f"; }
-  done
-  local req; req="$(required_checks)"
-  for f in "${CHECKS[@]}"; do
-    grep -qxF "$f" <<< "${req}" && ok "required: $f" || { [[ -n "${why}" ]] && lim "not required: $f (rulesets unavailable)" || bad "not a required check: $f"; }
-  done
-  while IFS= read -r f; do
-    [[ -z "$f" ]] && continue
-    printf '%s\n' "${CHECKS[@]}" | grep -qxF "$f" || warn "required check '$f' isn't posted by ci-workflows: every PR waits on it until something else reports it"
-  done <<< "${req}"
-  if [[ "$(gh_get "repos/${REPO}/rules/branches/${DEFAULT}" --jq '[.[] | select(.type=="required_status_checks") | .parameters.strict_required_status_checks_policy] | any')" == true ]] \
-     || classic_protection | jq -e '.required_status_checks.strict' > /dev/null 2>&1; then
-    ok "branches must be up to date before merging"
-  elif [[ -n "${why}" ]]; then
-    lim "branches needn't be up to date before merging (rulesets unavailable); the PR gate still fails a stale branch"
+  req="$(required_checks)"
+  strict="$(gh_get "repos/${REPO}/rules/branches/${DEFAULT}" --jq '[.[] | select(.type=="required_status_checks") | .parameters.strict_required_status_checks_policy] | any')"
+  cp="$(classic_protection)"
+  local unread; unread="$(head -1 "${GH_FAILF}")"
+  if [[ -n "${unread}" ]]; then
+    bad "couldn't read the branch protection on ${DEFAULT} from GitHub (${unread}); nothing about it is checked. Re-run onboard check"
   else
-    bad "branches needn't be up to date before merging (strict required checks is off)"
+    if [[ -n "${why}" ]]; then
+      lim "rulesets unavailable here: ${why}"
+    fi
+    if [[ -z "${bn_id}" ]]; then [[ -n "${why}" ]] || bad "ruleset 'branch naming' missing"; else
+      want="refs/heads/${DEFAULT}"; for f in "${PREFIXES[@]}"; do want+=",refs/heads/$f/**"; done
+      want="$(tr ',' '\n' <<< "${want}" | sort | paste -sd, -)"
+      is "branch naming: ${#PREFIXES[@]} prefixes + ${DEFAULT} excluded" "${bn_ex}" "${want}"
+      is "branch naming: includes" "${bn_inc}" "~ALL"
+      is "branch naming: rules" "${bn_rules}" creation
+      is "branch naming: enforcement" "${bn_enf}" active
+    fi
+    if [[ -z "${main_id}" ]]; then [[ -n "${why}" ]] || bad "ruleset 'main' missing"; else
+      is "main: targets the default branch" "${main_inc}" "~DEFAULT_BRANCH"
+      is "main: enforcement" "${main_enf}" active
+    fi
+    # What is actually in effect, from every source.
+    for f in pull_request required_linear_history required_status_checks; do
+      grep -qx "$f" <<< "${rules}" && ok "in effect: $f" || { [[ -n "${why}" ]] && lim "not in effect: $f (rulesets unavailable)" || bad "not in effect on ${DEFAULT}: $f"; }
+    done
+    for f in "${CHECKS[@]}"; do
+      grep -qxF "$f" <<< "${req}" && ok "required: $f" || { [[ -n "${why}" ]] && lim "not required: $f (rulesets unavailable)" || bad "not a required check: $f"; }
+    done
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      printf '%s\n' "${CHECKS[@]}" | grep -qxF "$f" || warn "required check '$f' isn't posted by ci-workflows: every PR waits on it until something else reports it"
+    done <<< "${req}"
+    if [[ "${strict}" == true ]] || jq -e '.required_status_checks.strict' <<< "${cp}" > /dev/null 2>&1; then
+      ok "branches must be up to date before merging"
+    elif [[ -n "${why}" ]]; then
+      lim "branches needn't be up to date before merging (rulesets unavailable); the PR gate still fails a stale branch"
+    else
+      bad "branches needn't be up to date before merging (strict required checks is off)"
+    fi
+    [[ -n "${cp}" ]] && warn "classic branch protection is also on ${DEFAULT}; its rules apply on top of the rulesets"
   fi
-  local cp; cp="$(classic_protection)"
-  [[ -n "${cp}" ]] && warn "classic branch protection is also on ${DEFAULT}; its rules apply on top of the rulesets"
 
   say "merging"
-  if grep -qx required_linear_history <<< "${rules}" && [[ "${sq}" != true && "${rb}" != true ]]; then
+  if [[ -z "${unread}" ]] && grep -qx required_linear_history <<< "${rules}" && [[ "${sq}" != true && "${rb}" != true ]]; then
     bad "no PR can merge: linear history is required but only merge commits are allowed. Allow squash or rebase merging (Settings → General → Pull Requests)"
   elif [[ "${sq}" != true && "${rb}" != true && "${mc}" != true ]]; then
     bad "the repo allows no merge method"
@@ -734,7 +757,7 @@ check() {
 if [[ "${CMD}" != init ]]; then
   command -v gh > /dev/null || die "gh is required"
   command -v jq > /dev/null || die "jq is required"
-  REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" || die "gh can't see this repo"
+  REPO="$(retry gh repo view --json nameWithOwner --jq .nameWithOwner)" || die "gh can't see this repo (or can't reach GitHub; the error is above)"
 fi
 
 case "${CMD}" in
