@@ -65,8 +65,12 @@ runs:
 
           while read -r sha; do
             [[ -z "${sha}" ]] && continue
-            refs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" \
-                      --jq '.[].head.ref' 2>/dev/null || true)"
+            # gh api prints the error body on stdout: never read it as a branch.
+            if ! refs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" \
+                           --jq '.[].head.ref' 2> "${RUNNER_TEMP}/pulls.err")"; then
+              echo "::error::Can't list the PRs merged as ${sha:0:7}: $(cat "${RUNNER_TEMP}/pulls.err"). The trigger workflow needs 'pull-requests: read' in its permissions block (copy it from examples/)."
+              exit 1
+            fi
             if [[ -z "${refs}" ]]; then
               echo "::warning::${sha:0:7} has no associated PR - direct push? Treating as patch."
               refs="(direct-push)"

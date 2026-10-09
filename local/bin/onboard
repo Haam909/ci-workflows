@@ -563,6 +563,12 @@ check() {
         && warn "$f differs from examples/ (branch ${DEFAULT}, @${REF}): diff <(git show origin/${DEFAULT}:.github/workflows/$f) <(${CIW}/local/bin/onboard ...)" \
         || bad "$f exists but doesn't call ci-workflows; it was there before onboarding. Replace it with examples/.github/workflows/$f"
     fi
+    # Off a public repo the token can't read a commit's PRs without it, and
+    # derive-version needs their branches for the version bump.
+    [[ "$f" == trigger-pull-request.yml || "${vis}" == public ]] && continue
+    git cat-file -e "origin/${DEFAULT}:.github/workflows/$f" 2> /dev/null || continue
+    git show "origin/${DEFAULT}:.github/workflows/$f" 2> /dev/null | grep -qE '^ *pull-requests: *(read|write)' \
+      || bad "$f doesn't grant pull-requests: read; on a ${vis} repo every release and test deploy stops at the version step. Add it to the permissions block (examples/.github/workflows/$f)"
   done
   git cat-file -e "origin/${DEFAULT}:${MANIFEST}" 2> /dev/null && ok "${MANIFEST}" || bad "${MANIFEST} missing"
   for f in "${GATE_FILES[@]}"; do
