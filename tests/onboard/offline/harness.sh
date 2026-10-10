@@ -46,6 +46,20 @@ t "ensure_repo: 404: created"             PASS  "creates=1"           'VIS=publi
 t "ensure_repo: 502 x3: INFRA, no create" INFRA "INFRA: can't read x/y: gh: Bad Gateway" 'VIS=public; ensure_repo; '"${CREATES}" "${E502}" "${E502}" "${E502}"
 t "ensure_repo: create refused: FAIL"     FAIL  "✗ creating x/y"      'VIS=public; ensure_repo' "${E404}" "${E422}"
 
+# Sandbox reset deletes the test packages an earlier row in that sandbox left,
+# and only those; each must then answer 404.
+RP='SLOT=01; PKG_API=user; reset_packages; echo "deletes=$(grep -c "^api -X DELETE" "${FAKE_LOG}")"'
+E403='1|{"message":"You need at least read:packages scope"}|gh: You need at least read:packages scope (HTTP 403)'
+GOT='0|ciwsbx.contracts.sbx01.rabc|'
+t "packages: none"                        PASS  "no earlier test packages for sbx01 deletes=0" "${RP}" '0||'
+t "packages: list 404: none"              PASS  "deletes=0"           "${RP}" "${E404}"
+t "packages: another sandbox's kept"      PASS  "deletes=0"           "${RP}" '0|ciwsbx.contracts.sbx02.rabc|'
+t "packages: deleted, then 404"           PASS  "✓ earlier test package ciwsbx.contracts.sbx01.rabc gone (404) deletes=1" "${RP}" "${GOT}" '0||' "${E404}"
+t "packages: list 502 x3: INFRA"          INFRA "INFRA: can't list GitHub Packages" "${RP}" "${E502}" "${E502}" "${E502}"
+t "packages: list 403: FAIL, names scope" FAIL  "delete:packages"     "${RP}" "${E403}"
+t "packages: delete 403: FAIL"            FAIL  "can't delete package" "${RP}" "${GOT}" "${E403}"
+t "packages: still there after deleting"  FAIL  "still there 60s"     "${RP}" "${GOT}" '0||' '0|x|' '0|x|' '0|x|' '0|x|' '0|x|' '0|x|'
+
 # Checks that never settle: one GitHub shows running after it finished is INFRA.
 OK_BN='{"name":"ci / branch-name","bucket":"pass","completedAt":"2026-10-10T15:23:19Z","link":"l/2"},{"name":"local/ci","bucket":"pass","completedAt":"0001-01-01T00:00:00Z","link":""}'
 WAIT='CHECKS_WAIT=0; wait_for_checks 82'
@@ -82,6 +96,13 @@ c "'timeout' early, real stop at the end" FAIL  $'restore: timeout 30s\n...\n...
 printf '%s\n' $'  ✗ couldn\'t read the branch protection on main from GitHub (x: TLS handshake timeout)\n── repo settings\n  ✓ auto-merge\n  ✓ merge methods: squash rebase merge\n1 problem(s).' > "${TMP}/onboard.out"
 t "apply: the reason is the ✗ line"       INFRA "apply:   ✗ couldn't read the branch protection" \
   'cp "${WORK_ROW}/onboard.out" "${WORK_ROW}/last.out"; onboard_failed "apply: $(stop_reason)"'
+
+# run stops before any row when the gh token can't list packages: every
+# sandbox reset deletes earlier test packages.
+printf '%s\n' '0|o|' "${E403}" > "${FAKE_Q}"; : > "${FAKE_LOG}"
+out="$(WORK="${TMP}/work" RESULTS="${TMP}/results" bash "${HERE}/../run" P1 2>&1)"; rc=$?
+if [[ "${rc}" == 2 && "${out}" == *"delete:packages"* && "$(wc -l < "${FAKE_LOG}")" == 2 ]]; then ok=ok; else ok=WRONG; WRONG=$((WRONG + 1)); fi
+printf '%-5s %-44s rc=%s  %s\n' "${ok}" "run: packages 403: stops, names the scopes" "${rc}" "${out:0:100}"
 
 echo "harness: ${WRONG} wrong"
 [[ "${WRONG}" == 0 ]]

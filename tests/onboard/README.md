@@ -13,7 +13,10 @@ whole path:
    `ci / branch-name` and `local/ci` must all be green, then merged with a
    method the repo allows;
 3. `trigger-release.yml` dispatched for that merge, the `release` gate
-   approved, `production` turned away so nothing is delivered from a sandbox;
+   approved, `production` turned away so nothing is delivered from a sandbox.
+   A Publish row (`FEED`) is the exception when all its components are
+   packages: its merge publishes a prerelease, and its release goes on to
+   `production`, publishes, and the stable version must be on the Feed;
 4. the draft release's assets: one artifact per component of the right kind,
    its cosign bundle, an SBOM whose root is `<name>@<version>`,
    `sha256sum -c SHA256SUMS`, and `gh attestation verify`.
@@ -31,7 +34,9 @@ Rows are in `rows.sh`: `L*` vary the code layout (each runtime and target,
 and a multi-component repo), `C*` vary the repo around the multi-component
 layout (default branch, visibility, protection, merge methods, existing tags
 and files, leftover branches, a branch that moves mid-onboarding, CRLF
-checkouts). Seeds are assembled from `parts/`.
+checkouts), and `P*` are Publish rows. Seeds are assembled from `parts/`.
+A Publish row's packages are named `<id>.sbx<slot>.r<run-id>`, so no two runs
+publish the same name.
 
 Rows share a pool of public sandboxes, `<you>/ciw-sbx-01` to `-10` (`POOL`),
 and private rows a pool of private ones, `<you>/ciw-sbx-p01` to `-p02`
@@ -41,7 +46,8 @@ created on first use and reset before each row; GitHub limits how fast an accoun
 create repos, so they're reused rather than made per row. Several `run`s can go
 at once: each row waits for a free sandbox, and each run keeps its own clones
 and logs, in `$WORK/<run-id>/<row>/`. Nothing is deleted except inside
-a sandbox: its rulesets, protection, environments, releases, tags and branches. The result is
+a sandbox: its rulesets, protection, environments, releases, tags and branches,
+and the test packages an earlier Publish row in it left on GitHub Packages. The result is
 `results/<run-id>/<row>.md`: every check the harness made, with the run URLs.
 `results/<row>.md` is a copy of the latest. Old run directories under `$WORK`
 and `results/` are safe to delete.
@@ -84,5 +90,7 @@ there.
   container rows check that the build stops at `azure/login`. The image build
   itself is covered by the self-test (`tests/components.yml`).
 
-Needs bash, git, gh (`repo` and `workflow` scopes), yq, jq, dotnet, node and
+Needs bash, git, gh (`repo`, `workflow`, `read:packages` and
+`delete:packages` scopes: `gh auth refresh -h github.com -s
+read:packages,delete:packages`), yq, jq, dotnet, node and
 python. Runs on Linux, macOS and Git Bash.
