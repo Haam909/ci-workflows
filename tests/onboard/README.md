@@ -39,9 +39,12 @@ and private rows a pool of private ones, `<you>/ciw-sbx-p01` to `-p02`
 refuses git access to a repo for a while after its visibility changes. Each is
 created on first use and reset before each row; GitHub limits how fast an account can
 create repos, so they're reused rather than made per row. Several `run`s can go
-at once: each row waits for a free sandbox. Nothing is deleted except inside
+at once: each row waits for a free sandbox, and each run keeps its own clones
+and logs, in `$WORK/<run-id>/<row>/`. Nothing is deleted except inside
 a sandbox: its rulesets, protection, environments, releases, tags and branches. The result is
-`results/<row>.md`: every check the harness made, with the run URLs.
+`results/<run-id>/<row>.md`: every check the harness made, with the run URLs.
+`results/<row>.md` is a copy of the latest. Old run directories under `$WORK`
+and `results/` are safe to delete.
 
 ## Testing a change before v1 moves
 

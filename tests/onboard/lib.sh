@@ -54,9 +54,13 @@ wait_for() {
 
 # ------------------------------------------------------------ sandbox ----
 
+# Create the sandbox only when GitHub says it doesn't exist: a read that failed
+# in a bad moment would otherwise "create" a repo that's already there.
 ensure_repo() {
-  gh api "repos/${REPO}" > /dev/null 2>&1 && return 0
-  gh repo create "${REPO}" "--${VIS}" --description "ci-workflows onboarding sandbox (tests/onboard); reset on every run" > /dev/null
+  gh_out gh api "repos/${REPO}" --jq .name > /dev/null && return 0
+  not_found || { fail_step "can't read ${REPO}: $(last_out | grep . | tail -1)"; return 1; }
+  logged gh repo create "${REPO}" "--${VIS}" --description "ci-workflows onboarding sandbox (tests/onboard); reset on every run" \
+    || { fail_step "creating ${REPO} failed: $(last_out | tail -1)"; return 1; }
 }
 
 # Back to nothing: no protection, environments, releases, tags, PRs or extra
@@ -376,6 +380,27 @@ checks_settled() {       # pr — the gate's three checks have all reported, non
          and all(.[]; .bucket != "pending")' <<< "$s" > /dev/null
 }
 
+# Wait for checks_settled. A check GitHub still shows as running although it
+# has finished (its completedAt is set) never settles: that's INFRA, not FAIL.
+CHECKS_WAIT=900
+wait_for_checks() {      # pr
+  local end=$(( $(date +%s) + CHECKS_WAIT )) s stuck
+  until checks_settled "$1"; do
+    if (( $(date +%s) >= end )); then
+      s="$(gh pr checks "$1" -R "${REPO}" --json name,bucket,completedAt,link 2> "${WORK_ROW}/last.out")" || [[ -n "$s" ]] \
+        || { fail_step "timed out after ${CHECKS_WAIT}s waiting for checks on PR #$1, then couldn't read them"; return 1; }
+      stuck="$(jq -r 'if (["ci / gate", "ci / branch-name", "local/ci"] - [.[].name] | length == 0)
+                         and any(.[]; .bucket == "pending")
+                         and all(.[] | select(.bucket == "pending"); .completedAt | startswith("0001") | not)
+                      then [.[] | select(.bucket == "pending") | .name + " (" + .link + ")"] | join(", ") else empty end' <<< "$s")"
+      if [[ -n "${stuck}" ]]; then infra "PR #$1: GitHub still shows ${stuck} as running, though it finished"
+      else fail "timed out after ${CHECKS_WAIT}s waiting for checks on PR #$1"; fi
+      return 1
+    fi
+    sleep 10
+  done
+}
+
 onboard_repo() {
   log "onboard init"
   if ! run_onboard init; then
@@ -396,12 +421,12 @@ onboard_repo() {
     local pr; pr="$(onboard_pr)" || { fail_step "can't list the open PRs"; return 1; }
     [[ -z "${pr}" ]] && break                 # direct push, or merged: done
     note "onboarding PR #${pr} open"
-    wait_for 900 "checks on PR #${pr}" checks_settled "${pr}" || return 1
+    wait_for_checks "${pr}" || return 1
     note "checks: $(gh pr checks "${pr}" -R "${REPO}" --json name,state --jq 'map(.name + "=" + .state) | join(", ")')"
     if [[ "${pass_no}" == 1 ]] && declare -F between > /dev/null; then
       RERUN_FROM_SCRATCH=false; between || return 1
       if [[ "${RERUN_FROM_SCRATCH}" == true ]]; then continue; fi
-      [[ "${PROTECT}" == strict ]] && { sleep 15; wait_for 900 "checks on PR #${pr}" checks_settled "${pr}" || return 1; }
+      [[ "${PROTECT}" == strict ]] && { sleep 15; wait_for_checks "${pr}" || return 1; }
     fi
   done
   pr="$(onboard_pr)" || { fail_step "can't list the open PRs"; return 1; }
@@ -448,7 +473,7 @@ feature_pr() {
   logged gh pr create -R "${REPO}" --base "${BRANCH}" --head feature/sandbox-change --title "feature: sandbox change" --body "tests/onboard" \
     || { fail_step "opening the feature PR failed: $(last_out | tail -1)"; return 1; }
   local pr; pr="$(last_out | grep -o '/pull/[0-9]*$' | grep -o '[0-9]*')"
-  wait_for 900 "checks on PR #${pr}" checks_settled "${pr}" || return 1
+  wait_for_checks "${pr}" || return 1
   local checks states
   checks="$(gh_out gh pr checks "${pr}" -R "${REPO}" --json name,state)" || { fail_step "can't read PR #${pr}'s checks"; return 1; }
   states="$(jq -r 'map(.name + "=" + .state) | join(", ")' <<< "${checks}")"
@@ -608,6 +633,9 @@ claim_sandbox() {
   echo "no free sandbox after 2h" >&2; return 1
 }
 
+# Per run: another run of the same row must not touch this one's clone or log.
+work_dir_of() { echo "${WORK_RUN}/$(tr 'A-Z' 'a-z' <<< "$1")"; }
+
 run_row() {
   local ROW="$1"
   # Defaults, then the row.
@@ -615,10 +643,9 @@ run_row() {
   VERSION=0.2.0; RELEASE=full; stop_at=""; RELEASE_RUN=""; RELEASE_SHA=""
   unset -f pre_seed pre_clone between after_onboard
   "row_${ROW}"
-  local slug; slug="$(tr 'A-Z' 'a-z' <<< "${ROW}")"
   claim_sandbox || return 1
   CIW_REPO="Haam909/ci-workflows"
-  WORK_ROW="${WORK}/${slug}"; rm -rf "${WORK_ROW}"; mkdir -p "${WORK_ROW}"
+  WORK_ROW="$(work_dir_of "${ROW}")"; mkdir -p "${WORK_ROW}"
   LOG="${WORK_ROW}/log.txt"; : > "${LOG}"; ROW_OK=true; ROW_FAILED=false
   local started; started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   log "row ${ROW}: seed [${SEED}] branch=${BRANCH} vis=${VIS} merges=[${MERGES}] protect=${PROTECT} tags=[${TAGS}] deploy=${DEPLOY}"
@@ -650,7 +677,9 @@ run_row() {
     echo '```'
     grep -E '^(▶|» )' "${LOG}"
     echo '```'
-  } > "${RESULTS}/${ROW}.md"
+  } > "${RESULTS_RUN}/${ROW}.md"
+  # results/<row>.md is the latest run's; replaced whole, never read half-written.
+  cp "${RESULTS_RUN}/${ROW}.md" "${RESULTS}/.${ROW}.md.$$" && mv -f "${RESULTS}/.${ROW}.md.$$" "${RESULTS}/${ROW}.md"
   rm -rf "${SLOT_LOCK}"
   return ${rc}
 }
