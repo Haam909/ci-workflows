@@ -1,0 +1,47 @@
+# Haam909/ci-workflows/.github/workflows/mirror-images.yml
+#
+# Copies the Docker Hub images self-test needs to ghcr.io/haam909, so its
+# jobs don't pull from Docker Hub and hit its anonymous pull limit. Weekly, so
+# python:3.12-slim follows upstream's security rebuilds.
+#
+# Read by: the registry service in self-test.yml, and the FROM line of
+# tests/fixtures/py-container/Dockerfile. The packages must be public.
+
+name: mirror-images
+
+on:
+  # A change to this file runs it, so the PR that makes the change proves it.
+  pull_request:
+    paths: [.github/workflows/mirror-images.yml]
+  push:
+    branches: [main]
+    paths: [.github/workflows/mirror-images.yml]
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - { src: docker.io/library/registry:2,        dst: ghcr.io/haam909/registry:2 }
+          - { src: docker.io/library/python:3.12-slim,  dst: ghcr.io/haam909/python:3.12-slim }
+    name: ${{ matrix.image.dst }}
+    steps:
+      - env:
+          SRC: ${{ matrix.image.src }}
+          DST: ${{ matrix.image.dst }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          # Copies the multi-arch index registry to registry; nothing is pulled locally.
+          docker buildx imagetools create -t "${DST}" "${SRC}"
+          docker buildx imagetools inspect "${DST}"
