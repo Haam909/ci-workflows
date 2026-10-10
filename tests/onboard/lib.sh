@@ -341,6 +341,14 @@ stopped_as_expected() {
   return 1
 }
 
+# Why onboard stopped, on one line: its ✗ lines, else its last words. Its
+# last lines are a summary ("1 problem(s).") under the ✓ lines.
+stop_reason() {
+  local why; why="$(last_out | grep '✗')"
+  [[ -n "${why}" ]] || why="$(last_out | tail -3)"
+  tr '\n' ' ' <<< "${why}"
+}
+
 # onboard's own failure is a FAIL, unless all it reports is GitHub reads it
 # couldn't make after retrying.
 onboard_failed() {
@@ -383,7 +391,7 @@ onboard_repo() {
     log "onboard apply (pass ${pass_no})"
     if ! run_onboard apply; then
       stopped_as_expected && return 2
-      onboard_failed "onboard apply failed: $(last_out | tail -3 | tr '\n' ' ')"; return 1
+      onboard_failed "onboard apply failed: $(stop_reason)"; return 1
     fi
     local pr; pr="$(onboard_pr)" || { fail_step "can't list the open PRs"; return 1; }
     [[ -z "${pr}" ]] && break                 # direct push, or merged: done
