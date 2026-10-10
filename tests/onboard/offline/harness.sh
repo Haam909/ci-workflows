@@ -39,6 +39,34 @@ t "job_conclusion: 502 x3: INFRA"         INFRA "INFRA: jobs"         'c="$(job_
 t "relax: no classic protection (404)"    PASS  "lowered"             'relax_protection' '0||' "${E404}"
 t "relax: classic 502 x3: INFRA"          INFRA "classic protection"  'relax_protection' '0||' "${E502}" "${E502}" "${E502}"
 
+# ensure_repo creates the sandbox only on a 404, never after a read that failed.
+CREATES='echo "creates=$(grep -c "^repo create" "${FAKE_LOG}")"'
+t "ensure_repo: exists"                   PASS  "creates=0"           'VIS=public; ensure_repo; '"${CREATES}" '0|y|'
+t "ensure_repo: 404: created"             PASS  "creates=1"           'VIS=public; ensure_repo; '"${CREATES}" "${E404}" '0||'
+t "ensure_repo: 502 x3: INFRA, no create" INFRA "INFRA: can't read x/y: gh: Bad Gateway" 'VIS=public; ensure_repo; '"${CREATES}" "${E502}" "${E502}" "${E502}"
+t "ensure_repo: create refused: FAIL"     FAIL  "✗ creating x/y"      'VIS=public; ensure_repo' "${E404}" "${E422}"
+
+# Checks that never settle: one GitHub shows running after it finished is INFRA.
+OK_BN='{"name":"ci / branch-name","bucket":"pass","completedAt":"2026-10-10T15:23:19Z","link":"l/2"},{"name":"local/ci","bucket":"pass","completedAt":"0001-01-01T00:00:00Z","link":""}'
+WAIT='CHECKS_WAIT=0; wait_for_checks 82'
+t "checks: finished but shown running"    INFRA "ci / gate (l/1) as running" "${WAIT}" '1||' \
+  "8|[{\"name\":\"ci / gate\",\"bucket\":\"pending\",\"completedAt\":\"2026-10-10T15:23:19Z\",\"link\":\"l/1\"},${OK_BN}]|"
+t "checks: still running: FAIL"           FAIL  "✗ timed out after 0s" "${WAIT}" '1||' \
+  "8|[{\"name\":\"ci / gate\",\"bucket\":\"pending\",\"completedAt\":\"0001-01-01T00:00:00Z\",\"link\":\"l/1\"},${OK_BN}]|"
+t "checks: one never reported: FAIL"      FAIL  "✗ timed out after 0s" "${WAIT}" '1||' "0|[${OK_BN}]|"
+t "checks: 502 reading them: INFRA"       INFRA "then couldn't read them" "${WAIT}" '1||' "${E502}"
+
+# Two runs of the same row at once: a sandbox and a work dir each.
+claim() {  # run-id
+  bash -c 'source "$1"; LOCKS="$2/locks"; WORK_RUN="$2/work/$3"; OWNER=o; VIS=public; POOL=2; ROW=C1
+           claim_sandbox && echo "${REPO} $(work_dir_of "${ROW}")"; trap - EXIT' _ "${LIB}" "${TMP}" "$1"
+}
+mkdir -p "${TMP}/locks"
+claim run-a > "${TMP}/a" & claim run-b > "${TMP}/b" & wait
+read -r ra wa < "${TMP}/a"; read -r rb wb < "${TMP}/b"
+if [[ -n "${ra}" && -n "${rb}" && "${ra}" != "${rb}" && "${wa}" != "${wb}" ]]; then ok=ok; else ok=WRONG; WRONG=$((WRONG + 1)); fi
+printf '%-5s %-44s %s\n' "${ok}" "two runs, one row: own sandbox and work dir" "${ra} ${wa##*/work/} | ${rb} ${wb##*/work/}"
+
 # onboard_failed: what onboard printed before it stopped decides the outcome.
 c() {      # name want-outcome onboard-output
   printf '%s\n' "$3" > "${TMP}/onboard.out"
