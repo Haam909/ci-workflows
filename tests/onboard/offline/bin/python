@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# A fake python for the offline tests: logs "<folder>: <arguments>" to
+# ${FAKE_LOG} and succeeds.
+echo "$(basename "${PWD}"): $*" >> "${FAKE_LOG}"

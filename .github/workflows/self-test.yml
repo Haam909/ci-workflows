@@ -23,7 +23,8 @@ permissions:
 
 jobs:
   # onboard and the onboard harness: shellcheck, and their handling of GitHub
-  # errors against a fake gh (tests/onboard/offline). No network.
+  # errors against a fake gh, and what bin/ci --install installs against a fake
+  # python (tests/onboard/offline). No network.
   scripts:
     runs-on: ubuntu-latest
     steps:
@@ -31,7 +32,8 @@ jobs:
       - run: |
           shellcheck -x -P SCRIPTDIR -S warning -s bash \
             local/bin/onboard tests/onboard/run tests/onboard/stage tests/onboard/lib.sh tests/onboard/rows.sh \
-            tests/onboard/offline/run tests/onboard/offline/onboard.sh tests/onboard/offline/harness.sh tests/onboard/offline/bin/gh
+            tests/onboard/offline/run tests/onboard/offline/onboard.sh tests/onboard/offline/harness.sh tests/onboard/offline/bin-ci.sh \
+            tests/onboard/offline/bin/gh tests/onboard/offline/bin/python
       - run: bash tests/onboard/offline/run
 
   discover:
