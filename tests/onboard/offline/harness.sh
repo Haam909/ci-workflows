@@ -49,5 +49,11 @@ c "check: couldn't read protection"       INFRA $'  ✗ couldn\'t read the branc
 c "apply: waiting on a required check"    FAIL  $'PR #13 can\'t be merged yet. It is waiting on:\n  - required check \'ci / gate\': \nWhen that\'s done, run onboard apply again.'
 c "'timeout' early, real stop at the end" FAIL  $'restore: timeout 30s\n...\n...\n...\n...\n...\nthe repo allows only merge commits'
 
+# The reason a row gives quotes onboard's ✗ line, which comes before more ✓
+# lines and the summary, not its last lines.
+printf '%s\n' $'  ✗ couldn\'t read the branch protection on main from GitHub (x: TLS handshake timeout)\n── repo settings\n  ✓ auto-merge\n  ✓ merge methods: squash rebase merge\n1 problem(s).' > "${TMP}/onboard.out"
+t "apply: the reason is the ✗ line"       INFRA "apply:   ✗ couldn't read the branch protection" \
+  'cp "${WORK_ROW}/onboard.out" "${WORK_ROW}/last.out"; onboard_failed "apply: $(stop_reason)"'
+
 echo "harness: ${WRONG} wrong"
 [[ "${WRONG}" == 0 ]]
