@@ -12,6 +12,10 @@
 #   DEPLOY      true adds the merge trigger                 (false)
 #   VERSION     release version expected                    (0.2.0)
 #   RELEASE     full | build-fails:<component>              (full)
+#   FEED        "" | github: the Feed its packages publish to; set, it's a
+#               Publish row, named per run, released on to production  ("")
+#                 github  GitHub Packages on the repo's Host, the default a
+#                         component with no `feed` gets
 # and may define hooks, each run in the sandbox clone:
 #   pre_seed      edit the seed tree before it's pushed
 #   pre_clone     configure the repo before onboarding
@@ -51,3 +55,6 @@ row_C10() { SEED="${APP_SEED}"; TAGS="v1.4.0 release-2024"; VERSION=1.5.0; }
 row_C11() { SEED="${APP_SEED}"; pre_seed() { seed_conflicting_files; }; stop_at='RestorePackagesWithLockFile'; }
 row_C12() { SEED="${APP_SEED}"; after_onboard() { crlf_clone_runs_gate; }; }
 row_C13() { SEED="${APP_SEED}"; PROTECT=pr-only; DEPLOY=true; }
+
+# ---- publish rows: the release goes on to production and publishes ------
+row_P1()  { SEED="dotnet-lib"; FEED=github; DEPLOY=true; }

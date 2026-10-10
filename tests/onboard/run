@@ -24,21 +24,26 @@
 # row waits for a free sandbox. Results go to results/<run-id>/<row>.md, and
 # results/<row>.md is the latest; clones and logs to $WORK/<run-id>/<row>/.
 #
-# Needs: bash, git, gh (repo + workflow scopes), yq, jq, dotnet, node, python.
+# Needs: bash, git, gh (repo, workflow, read:packages and delete:packages
+# scopes), yq, jq, dotnet, node, python.
 
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CIW_UNDER_TEST="${CIW_UNDER_TEST:-$(cd "${HERE}/../.." && pwd)}"
 CIW_REF="${CIW_REF:-v1}"
-OWNER="${OWNER:-$(gh api user --jq .login)}"
+ME="$(gh api user --jq .login)"
+OWNER="${OWNER:-${ME}}"
 [[ -n "${OWNER}" ]] || { echo "can't read the gh user; set OWNER, or check gh auth status" >&2; exit 2; }
+# Test packages are listed and deleted under the owner (lib.sh reset_packages).
+if [[ "${OWNER}" == "${ME}" ]]; then PKG_API=user; else PKG_API="orgs/${OWNER}"; fi
 ONBOARD="${CIW_UNDER_TEST}/local/bin/onboard"
 WORK="${WORK:-${TMPDIR:-${TEMP:-/tmp}}/ciw-onboard}"     # clones and logs, per row
 RESULTS="${RESULTS:-${HERE}/results}"
 LOCKS="${HOME}/.ciw-sandbox-locks"                       # shared by every run on this machine
 mkdir -p "${LOCKS}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"           # another run's rows never share these
+RUN_TAG="$(tr 'A-Z' 'a-z' <<< "${RUN_ID}" | tr -cd 'a-z0-9')"   # in a Publish row's package names
 WORK_RUN="${WORK}/${RUN_ID}"
 RESULTS_RUN="${RESULTS}/${RUN_ID}"
 
@@ -55,6 +60,11 @@ case "${1:-}" in
 esac
 
 for t in git gh yq jq dotnet node npm python; do command -v "$t" > /dev/null || { echo "$t is required" >&2; exit 2; }; done
+# Every sandbox reset deletes earlier test packages, which needs the scopes.
+# Read first: under pipefail, gh's own failure would decide a piped grep.
+if grep -q 'HTTP 403' <<< "$(gh api "${PKG_API}/packages?package_type=nuget&per_page=1" 2>&1)"; then
+  echo "can't list ${OWNER}'s GitHub Packages; ${PACKAGES_SCOPES}" >&2; exit 2
+fi
 mkdir -p "${WORK_RUN}" "${RESULTS_RUN}"
 
 FAILED_ROWS=(); INFRA_ROWS=()

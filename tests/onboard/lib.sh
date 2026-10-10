@@ -83,6 +83,7 @@ reset_repo() {
     sleep 10
   done
   [[ -z "${left}" ]] || { infra "sandbox reset incomplete: ${left}"; return 1; }
+  reset_packages || return 1
   gh_out gh api -X PATCH "repos/${REPO}" -F allow_squash_merge=true -F allow_rebase_merge=true -F allow_merge_commit=true \
     -F delete_branch_on_merge=false > /dev/null || { fail_step "resetting the merge settings failed"; return 1; }
   # Sandboxes never change visibility: GitHub refuses git access ("Your
@@ -105,6 +106,67 @@ sandbox_leftovers() {
   printf '%s' "${out}"
 }
 
+# ------------------------------------------------------------ packages ----
+
+# A Publish row's packages are named <id>.sbx<slot>.r<run>: a sandbox reused
+# by the next run never meets a version the Feed already holds, and its reset
+# knows which packages are its own.
+PACKAGES_SCOPES="the gh token needs read:packages and delete:packages: gh auth refresh -h github.com -s read:packages,delete:packages"
+
+name_test_packages() {   # seed dir
+  local f id new
+  TEST_PACKAGES=()
+  [[ -n "${FEED}" ]] || return 0
+  while IFS= read -r -d '' f; do
+    id="$(grep -o '<PackageId>[^<]*' "$f" | sed 's/.*>//')"
+    [[ -n "${id}" ]] || continue
+    new="$(tr 'A-Z' 'a-z' <<< "${id}").sbx${SLOT}.r${RUN_TAG}"
+    sed -i "s#<PackageId>${id}</PackageId>#<PackageId>${new}</PackageId>#" "$f"
+    TEST_PACKAGES+=("${new}")
+  done < <(find "$1" -name '*.csproj' -print0)
+  note "test packages: ${TEST_PACKAGES[*]:-none}"
+}
+
+# Delete the test packages an earlier row in this sandbox published; each must
+# then answer 404. The row itself hasn't published yet, so every match is old.
+reset_packages() {
+  local names n try gone
+  if ! names="$(gh_out gh api --paginate "${PKG_API:-user}/packages?package_type=nuget&per_page=100" --jq '.[].name')"; then
+    if not_found; then names=""
+    elif last_out | grep -q 'HTTP 403'; then fail "can't list GitHub Packages: ${PACKAGES_SCOPES}"; return 1
+    else fail_step "can't list GitHub Packages to delete earlier test packages"; return 1; fi
+  fi
+  names="$(grep -iE "\.sbx${SLOT}\.r[0-9a-z]+$" <<< "${names}")"
+  [[ -n "${names}" ]] || { note "no earlier test packages for sbx${SLOT}"; return 0; }
+  for n in ${names}; do
+    if ! gh_out gh api -X DELETE "${PKG_API:-user}/packages/nuget/${n}" > /dev/null && ! not_found; then
+      if last_out | grep -q 'HTTP 403'; then fail "can't delete package ${n}: ${PACKAGES_SCOPES}"; else fail_step "deleting package ${n} failed"; fi
+      return 1
+    fi
+    gone=false
+    for try in 1 2 3 4 5 6; do
+      if gh_out gh api "${PKG_API:-user}/packages/nuget/${n}" --jq .name > /dev/null; then sleep 10; continue; fi
+      not_found || { fail_step "can't read package ${n} after deleting it"; return 1; }
+      gone=true; break
+    done
+    [[ "${gone}" == true ]] || { fail "earlier test package ${n} still there 60s after deleting it"; return 1; }
+    pass "earlier test package ${n} gone (404)"
+  done
+}
+
+# The Feed holds this version of a test package.
+on_feed() {              # name version
+  gh api "${PKG_API:-user}/packages/nuget/$1/versions?per_page=100" --jq '.[].name' 2> /dev/null | grep -qxF "$2"
+}
+
+feed_holds() {           # version when
+  local n
+  [[ ${#TEST_PACKAGES[@]} -gt 0 ]] || { fail "no test packages named for this row"; return 1; }
+  for n in "${TEST_PACKAGES[@]}"; do
+    wait_for 300 "${n} $1 on GitHub Packages" on_feed "${n}" "$1" && pass "${n} $1 on GitHub Packages ($2)"
+  done
+}
+
 assemble_seed() {        # dir
   local dir="$1" part
   rm -rf "${dir}"; mkdir -p "${dir}"
@@ -120,6 +182,7 @@ assemble_seed() {        # dir
 push_seed() {
   local dir="${WORK_ROW}/seed" b t
   assemble_seed "${dir}" || return 1
+  name_test_packages "${dir}"
   (
     cd "${dir}" || exit 1
     git init -q -b "${BRANCH}"
@@ -502,6 +565,24 @@ feature_pr() {
   pass "feature PR merged by ${method}: $(git log --oneline -1 "${RELEASE_SHA}")"
 }
 
+# A Publish row's merge publishes a prerelease: the version derive-version
+# gives it, <next>-alpha.<commits since the last tag>.
+merge_publish() {
+  log "prerelease at merge"
+  local prev want run c
+  retried git fetch -q --tags origin || { fail_step "fetching the tags failed"; return 1; }
+  prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${RELEASE_SHA}" 2> /dev/null)" || { fail "no v* tag behind ${RELEASE_SHA:0:7}"; return 1; }
+  want="${VERSION}-alpha.$(git rev-list --count "${prev}..${RELEASE_SHA}")"
+  wait_for 300 "the merge-trigger run for ${RELEASE_SHA:0:7}" bash -c "[[ -n \"\$(gh run list -R '${REPO}' --workflow trigger-merge-to-main.yml --json databaseId,headSha --jq '.[] | select(.headSha==\"${RELEASE_SHA}\") | .databaseId')\" ]]" || return 1
+  run="$(gh_out gh run list -R "${REPO}" --workflow trigger-merge-to-main.yml --json databaseId,headSha --jq "[.[] | select(.headSha==\"${RELEASE_SHA}\") | .databaseId] | .[0]")" \
+    || { fail_step "can't list the merge-trigger runs"; return 1; }
+  note "merge run https://github.com/${REPO}/actions/runs/${run}"
+  wait_for 1200 "merge run ${run} to finish" run_done "${run}" || return 1
+  c="$(job_conclusion "${run}" ' -> test$')" || { fail_step "can't read the merge run's jobs"; return 1; }
+  [[ "${c}" == success ]] && pass "merge run delivered to test" || { fail "merge run's deliver jobs: ${c:-no conclusion}"; return 1; }
+  feed_holds "${want}" merge
+}
+
 # ------------------------------------------------------------ release ----
 
 run_status() { gh_out gh run view "$1" -R "${REPO}" --json status --jq .status; }
@@ -518,7 +599,13 @@ job_conclusion() {
 
 release() {
   log "release"
-  # Hold production so promote never delivers anything from a sandbox.
+  # Hold production so promote delivers nothing from a sandbox, except a
+  # Publish row's packages: those are what it's there to publish.
+  DELIVER=false
+  if [[ -n "${FEED}" ]]; then
+    if [[ "$(yq '[.components[] | select(.target != "package")] | length' .github/components.yml)" == 0 ]]; then DELIVER=true
+    else note "a Publish row with components that aren't packages: production is turned away"; fi
+  fi
   local me; me="$(gh_out gh api user --jq .id)" || { fail_step "can't read the gh user"; return 1; }
   printf '{"reviewers":[{"type":"User","id":%s}]}' "${me}" > "${WORK_ROW}/production.json"
   gh_out gh api -X PUT "repos/${REPO}/environments/production" --input "${WORK_ROW}/production.json" > /dev/null \
@@ -545,16 +632,20 @@ release() {
   done
   [[ "${approved}" == true ]] && pass "release gate approved" || note "release gate never waited for approval"
 
-  # Wait for publish (or the build failure), then turn production away.
+  # Wait for publish (or the build failure), then turn production away, or
+  # let a Publish row's packages through.
+  local state=rejected comment="tests/onboard: sandbox, not delivered" decided=""
+  [[ "${DELIVER}" == true ]] && { state=approved; comment="tests/onboard: Publish row, packages only"; }
   end=$(( $(date +%s) + 1500 ))
   while (( $(date +%s) < end )) && ! run_done "${run}"; do
     if run_waiting_on "${run}" production; then
       local ids; ids="$(gh api "repos/${REPO}/actions/runs/${run}/pending_deployments" --jq '[.[] | .environment.id]')"
-      jq -n --argjson ids "${ids}" '{environment_ids: $ids, state: "rejected", comment: "tests/onboard: sandbox, not delivered"}' \
-        | gh api -X POST "repos/${REPO}/actions/runs/${run}/pending_deployments" --input - > /dev/null
+      jq -n --argjson ids "${ids}" --arg state "${state}" --arg comment "${comment}" '{environment_ids: $ids, state: $state, comment: $comment}' \
+        | gh api -X POST "repos/${REPO}/actions/runs/${run}/pending_deployments" --input - > /dev/null && decided="${state}"
     fi
     sleep 15
   done
+  [[ -z "${decided}" ]] || note "production ${decided}"
   local st; st="$(run_status "${run}")" || { fail_step "can't read the release run's status"; return 1; }
   [[ "${st}" == completed ]] || { fail "release run didn't finish"; return 1; }
   note "jobs: $(gh run view "${run}" -R "${REPO}" --json jobs --jq '.jobs | map(.name + "=" + .conclusion) | join(", ")')"
@@ -574,6 +665,15 @@ release() {
   c="$(job_conclusion "${run}" '^tag and draft')" || { fail_step "can't read the release run's jobs"; return 1; }
   [[ "${c}" == success ]] && pass "draft release published" || { fail "publish: ${c:-no conclusion}"; return 1; }
   check_assets
+  [[ "${DELIVER}" == true ]] || return 0
+
+  c="$(job_conclusion "${run}" '^promote')" || { fail_step "can't read the release run's jobs"; return 1; }
+  [[ "${c}" == success ]] && pass "promoted to production" || { fail "promote: ${c:-no conclusion}"; return 1; }
+  c="$(job_conclusion "${run}" '^publish release')" || { fail_step "can't read the release run's jobs"; return 1; }
+  [[ "${c}" == success ]] || { fail "publish release: ${c:-no conclusion}"; return 1; }
+  c="$(gh_out gh release view "v${VERSION}" -R "${REPO}" --json isDraft --jq .isDraft)" || { fail_step "can't read release v${VERSION}"; return 1; }
+  [[ "${c}" == false ]] && pass "release v${VERSION} published, not a draft" || fail "release v${VERSION} is still a draft"
+  feed_holds "${VERSION}" release
 }
 
 check_assets() {
@@ -622,7 +722,7 @@ claim_sandbox() {
     for (( i = 1; i <= n; i++ )); do
       slot="${prefix}$(printf '%02d' "$i")"
       if mkdir "${LOCKS}/slot-${slot}.lock" 2> /dev/null; then
-        SLOT_LOCK="${LOCKS}/slot-${slot}.lock"; REPO="${OWNER}/ciw-sbx-${slot}"
+        SLOT_LOCK="${LOCKS}/slot-${slot}.lock"; SLOT="${slot}"; REPO="${OWNER}/ciw-sbx-${slot}"
         echo "${ROW} $$" > "${SLOT_LOCK}/owner"
         trap 'rm -rf "${SLOT_LOCK}"' EXIT
         return 0
@@ -640,7 +740,7 @@ run_row() {
   local ROW="$1"
   # Defaults, then the row.
   SEED=""; BRANCH=main; VIS=public; MERGES="squash rebase merge"; PROTECT=none; TAGS=""; DEPLOY=false
-  VERSION=0.2.0; RELEASE=full; stop_at=""; RELEASE_RUN=""; RELEASE_SHA=""
+  VERSION=0.2.0; RELEASE=full; FEED=""; stop_at=""; RELEASE_RUN=""; RELEASE_SHA=""; TEST_PACKAGES=(); DELIVER=false
   unset -f pre_seed pre_clone between after_onboard
   "row_${ROW}"
   claim_sandbox || return 1
@@ -648,7 +748,7 @@ run_row() {
   WORK_ROW="$(work_dir_of "${ROW}")"; mkdir -p "${WORK_ROW}"
   LOG="${WORK_ROW}/log.txt"; : > "${LOG}"; ROW_OK=true; ROW_FAILED=false
   local started; started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  log "row ${ROW}: seed [${SEED}] branch=${BRANCH} vis=${VIS} merges=[${MERGES}] protect=${PROTECT} tags=[${TAGS}] deploy=${DEPLOY}"
+  log "row ${ROW}: seed [${SEED}] branch=${BRANCH} vis=${VIS} merges=[${MERGES}] protect=${PROTECT} tags=[${TAGS}] deploy=${DEPLOY} feed=${FEED:-none}"
   note "repo https://github.com/${REPO}, onboard from ${ONBOARD} ($(git -C "${CIW_UNDER_TEST}" rev-parse --short HEAD)), triggers @${CIW_REF}"
 
   local rc=0
@@ -665,6 +765,7 @@ run_row() {
     # Carry on after a ✗ so one row reports everything it hits; the row fails at the end.
     [[ "${rc}" == 0 ]] || exit_row
     feature_pr || exit_row
+    if [[ -n "${FEED}" ]]; then merge_publish || exit_row; fi
     release || exit_row
     exit_row
   ); rc=$?
