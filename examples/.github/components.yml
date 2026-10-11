@@ -16,8 +16,9 @@
 #   integration-tests       dotnet integration test project; enables the integration job
 #   health-path             enables smoke test + automatic rollback on promote
 #   resource-group          overrides vars.AZURE_RESOURCE_GROUP
-#   feed                    package feed URL. Defaults to GitHub Packages for
-#                           nuget and npm; required for python.
+#   feed                    package feed URL. Defaults to GitHub Packages on
+#                           the repo's Host for nuget and npm; required for
+#                           python.
 #   feed-token-secret       name of a secret holding the feed's token. Only
 #                           for feeds that are neither GitHub Packages nor
 #                           Azure Artifacts — those two authenticate from the

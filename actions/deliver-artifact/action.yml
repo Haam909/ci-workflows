@@ -17,7 +17,7 @@ inputs:
   resource-group:
     default: ''
   github-token:
-    description: 'GITHUB_TOKEN, used when the feed is GitHub Packages'
+    description: "GITHUB_TOKEN, used when the feed is GitHub Packages on the repo's Host"
     default: ''
   feed-token:
     description: >-
@@ -139,8 +139,10 @@ runs:
     # ---------- package feeds ----------
     #
     # The feed is whatever the manifest says; it defaults to GitHub Packages
-    # for NuGet and npm. Credentials are derived from the feed's host, so no
-    # PAT is needed for GitHub Packages or Azure Artifacts.
+    # on the repo's own Host for NuGet and npm. That Host is read from the
+    # runner, so a <tenant>.ghe.com repo gets nuget.<tenant>.ghe.com, not
+    # nuget.pkg.github.com. Credentials are derived from the feed's host, so
+    # no PAT is needed for GitHub Packages or Azure Artifacts.
     #
     # Feeds are immutable. A prerelease published from main is what consumers
     # try before a stable version exists; a bad stable release is fixed by
@@ -160,35 +162,48 @@ runs:
         RUNTIME="$(jq -r '.runtime' <<< "$C")"
         FEED="$(jq -r '.feed // empty' <<< "$C")"
 
+        # GitHub Packages on this Host: <registry>.pkg.github.com on
+        # github.com, <registry>.<tenant>.ghe.com on a GHE.com tenant. Both
+        # serve their API from api.<host>; on any other layout PKG stays
+        # empty, so no feed is taken for this Host's GitHub Packages.
+        HOST="${GITHUB_SERVER_URL#https://}"; HOST="${HOST%/}"
+        PKG=""
+        if [[ "${GITHUB_API_URL%/}" == "https://api.${HOST}" ]]; then
+          if [[ "${HOST}" == github.com ]]; then PKG=pkg.github.com; else PKG="${HOST}"; fi
+        fi
+
         # Default feed per runtime. GitHub Packages has no Python registry,
         # so a Python package must name its feed explicitly.
         if [[ -z "${FEED}" ]]; then
+          if [[ "${RUNTIME}" != python && -z "${PKG}" ]]; then
+            echo "::error::Can't tell where GitHub Packages is on this Host (server ${GITHUB_SERVER_URL}, API ${GITHUB_API_URL}) — set 'feed' on the component."
+            exit 1
+          fi
           case "${RUNTIME}" in
-            dotnet) FEED="https://nuget.pkg.github.com/${GITHUB_REPOSITORY_OWNER}/index.json" ;;
-            node)   FEED="https://npm.pkg.github.com" ;;
+            dotnet) FEED="https://nuget.${PKG}/${GITHUB_REPOSITORY_OWNER}/index.json" ;;
+            node)   FEED="https://npm.${PKG}" ;;
             python) echo "::error::Python packages need a 'feed' upload URL in the manifest."; exit 1 ;;
           esac
         fi
 
-        case "${FEED}" in
-          *pkgs.dev.azure.com*|*.visualstudio.com*)
-            # 499b84ac-... is the Azure DevOps resource ID. The token comes
-            # from the same OIDC login as the Azure deploys, so no PAT.
-            TOKEN="$(az account get-access-token \
-                       --resource 499b84ac-1321-427f-aa17-267ca6975798 \
-                       --query accessToken -o tsv)"
-            echo "Feed: Azure Artifacts" ;;
-          *pkg.github.com*)
-            TOKEN="${GH_TOKEN_IN}"
-            echo "Feed: GitHub Packages" ;;
-          *)
-            if [[ -z "${FEED_TOKEN_IN}" ]]; then
-              echo "::error::${FEED} is not GitHub Packages or Azure Artifacts — set 'feed-token-secret' on the component to the name of a secret holding its token."
-              exit 1
-            fi
-            TOKEN="${FEED_TOKEN_IN}"
-            echo "Feed: custom (${FEED})" ;;
-        esac
+        FEED_HOST="${FEED#*://}"; FEED_HOST="${FEED_HOST%%/*}"; FEED_HOST="${FEED_HOST,,}"
+        if [[ "${FEED_HOST}" == pkgs.dev.azure.com || "${FEED_HOST}" == *.visualstudio.com ]]; then
+          # 499b84ac-... is the Azure DevOps resource ID. The token comes
+          # from the same OIDC login as the Azure deploys, so no PAT.
+          TOKEN="$(az account get-access-token \
+                     --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+                     --query accessToken -o tsv)"
+          echo "Feed: Azure Artifacts"
+        elif [[ -n "${PKG}" && ( "${FEED_HOST}" == "nuget.${PKG}" || "${FEED_HOST}" == "npm.${PKG}" ) ]]; then
+          TOKEN="${GH_TOKEN_IN}"
+          echo "Feed: GitHub Packages"
+        elif [[ -z "${FEED_TOKEN_IN}" ]]; then
+          echo "::error::${FEED} is not GitHub Packages or Azure Artifacts — set 'feed-token-secret' on the component to the name of a secret holding its token."
+          exit 1
+        else
+          TOKEN="${FEED_TOKEN_IN}"
+          echo "Feed: custom (${FEED})"
+        fi
 
         case "${RUNTIME}" in
           dotnet)

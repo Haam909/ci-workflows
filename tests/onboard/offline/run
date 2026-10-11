@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tests/onboard/offline/run — onboard's and the harness's handling of GitHub
-# errors, against a fake gh, and what bin/ci --install installs, against a
-# fake python: no network, no sandboxes, under a minute.
+# errors, against a fake gh, what bin/ci --install installs, against a
+# fake python, and which Feed the deliver step publishes to, against fake
+# dotnet, npm and az: no network, no sandboxes, under a minute.
 #
 #   tests/onboard/offline/run
 #
@@ -13,4 +14,5 @@ rc=0
 bash "${HERE}/onboard.sh" || rc=1
 bash "${HERE}/harness.sh" || rc=1
 bash "${HERE}/bin-ci.sh" || rc=1
+bash "${HERE}/deliver.sh" || rc=1
 exit "${rc}"

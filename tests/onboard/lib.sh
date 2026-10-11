@@ -472,6 +472,12 @@ onboard_repo() {
   fi
   check_manifest
   sed -i 's/   # onboard: check this//' .github/components.yml
+  if [[ "${FEED}" == github-named ]]; then
+    # github.com's GitHub Packages, named as a Consuming repo would name it.
+    FEED_URL="https://nuget.pkg.github.com/${OWNER}/index.json" \
+      yq -i '(.components[] | select(.target == "package")).feed = strenv(FEED_URL)' .github/components.yml
+    note "manifest names feed https://nuget.pkg.github.com/${OWNER}/index.json"
+  fi
   dev_setup
 
   local pass_no
@@ -580,6 +586,8 @@ merge_publish() {
   wait_for 1200 "merge run ${run} to finish" run_done "${run}" || return 1
   c="$(job_conclusion "${run}" ' -> test$')" || { fail_step "can't read the merge run's jobs"; return 1; }
   [[ "${c}" == success ]] && pass "merge run delivered to test" || { fail "merge run's deliver jobs: ${c:-no conclusion}"; return 1; }
+  c="$(gh_out gh run view "${run}" -R "${REPO}" --log)" || { fail_step "can't read the merge run's log"; return 1; }
+  grep -q 'Feed: GitHub Packages' <<< "${c}" && pass "merge run log: Feed: GitHub Packages" || fail "merge run log has no 'Feed: GitHub Packages'"
   feed_holds "${want}" merge
 }
 
