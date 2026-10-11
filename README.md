@@ -300,7 +300,7 @@ out from the feed's host, so the common cases need no stored token:
 | Feed | Default for | Auth |
 |---|---|---|
 | Azure Artifacts (`pkgs.dev.azure.com`) | — | Entra token from the workflow's OIDC login |
-| GitHub Packages | `dotnet`, `node` | `GITHUB_TOKEN` |
+| GitHub Packages on the repo's Host (`nuget.pkg.github.com`, `npm.pkg.github.com`; `nuget.<tenant>.ghe.com`, `npm.<tenant>.ghe.com` on GHE.com) | `dotnet`, `node` | `GITHUB_TOKEN` |
 | Anything else | — | secret named by `feed-token-secret` |
 
 ```yaml
