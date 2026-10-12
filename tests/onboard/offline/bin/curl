@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# A fake curl for the offline tests: plays back ${FAKE_Q} like the fake gh,
+# each line "status|body|", writing the body to -o and printing the status
+# as -w '%{http_code}' would. Logs "curl <arguments>" to ${FAKE_LOG}.
+echo "curl $*" >> "${FAKE_LOG}"
+out=/dev/stdout
+while (( $# )); do [[ "$1" == -o ]] && { out="$2"; shift; }; shift; done
+line="$(head -1 "${FAKE_Q}")"; sed -i 1d "${FAKE_Q}"
+IFS='|' read -r code body _ <<< "${line}"
+# RESET stands for a connection the network dropped.
+[[ "${line}" == RESET ]] && { echo "curl: (35) Recv failure: Connection was reset" >&2; exit 35; }
+printf '%s' "${body}" > "${out}"
+printf '%s' "${code}"

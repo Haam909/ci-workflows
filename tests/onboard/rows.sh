@@ -12,13 +12,16 @@
 #   DEPLOY      true adds the merge trigger                 (false)
 #   VERSION     release version expected                    (0.2.0)
 #   RELEASE     full | build-fails:<component>              (full)
-#   FEED        "" | github | github-named: the Feed its packages publish to;
-#               set, it's a Publish row, named per run, released on to
-#               production                                              ("")
+#   FEED        "" | github | github-named | azure-org: the Feed its
+#               packages publish to; set, it's a Publish row, named per run,
+#               released on to production                               ("")
 #                 github        GitHub Packages on the repo's Host, the
 #                               default a component with no `feed` gets
 #                 github-named  the same Feed, named by each package's
 #                               `feed` in the manifest
+#                 azure-org     the org-scoped Azure Artifacts Feed
+#                               AZDO_ORG/AZDO_FEED; the sandbox logs in to
+#                               Azure with no AZURE_SUBSCRIPTION_ID
 # and may define hooks, each run in the sandbox clone:
 #   pre_seed      edit the seed tree before it's pushed
 #   pre_clone     configure the repo before onboarding
@@ -62,3 +65,5 @@ row_C13() { SEED="${APP_SEED}"; PROTECT=pr-only; DEPLOY=true; }
 # ---- publish rows: the release goes on to production and publishes ------
 row_P1()  { SEED="dotnet-lib"; FEED=github; DEPLOY=true; }
 row_P2()  { SEED="dotnet-lib"; FEED=github-named; DEPLOY=true; }
+row_P3()  { SEED="dotnet-lib"; FEED=azure-org; DEPLOY=true; }
+row_P4()  { SEED="node-pkg"; FEED=azure-org; DEPLOY=true; }

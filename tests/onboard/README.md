@@ -36,7 +36,10 @@ layout (default branch, visibility, protection, merge methods, existing tags
 and files, leftover branches, a branch that moves mid-onboarding, CRLF
 checkouts), and `P*` are Publish rows. Seeds are assembled from `parts/`.
 A Publish row's packages are named `<id>.sbx<slot>.r<run-id>`, so no two runs
-publish the same name.
+publish the same name. `P1` and `P2` publish to GitHub Packages; `P3` (dotnet)
+and `P4` (node) to an org-scoped Azure Artifacts Feed, from a sandbox with no
+`AZURE_SUBSCRIPTION_ID`. Those two need the Feed, the Entra app and `az`, set
+up in `SANDBOXES.md`.
 
 Rows share a pool of public sandboxes, `<you>/ciw-sbx-01` to `-10` (`POOL`),
 and private rows a pool of private ones, `<you>/ciw-sbx-p01` to `-p02`
@@ -47,7 +50,8 @@ create repos, so they're reused rather than made per row. Several `run`s can go
 at once: each row waits for a free sandbox, and each run keeps its own clones
 and logs, in `$WORK/<run-id>/<row>/`. Nothing is deleted except inside
 a sandbox: its rulesets, protection, environments, releases, tags and branches,
-and the test packages an earlier Publish row in it left on GitHub Packages. The result is
+its Azure variables, and the test packages an earlier Publish row in it left
+on GitHub Packages, and on Azure Artifacts when `AZDO_ORG` is set. The result is
 `results/<run-id>/<row>.md`: every check the harness made, with the run URLs.
 `results/<row>.md` is a copy of the latest. Old run directories under `$WORK`
 and `results/` are safe to delete.

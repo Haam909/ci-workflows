@@ -51,7 +51,7 @@ t "ensure_repo: create refused: FAIL"     FAIL  "✗ creating x/y"      'VIS=pub
 RP='SLOT=01; PKG_API=user; reset_packages; echo "deletes=$(grep -c "^api -X DELETE" "${FAKE_LOG}")"'
 E403='1|{"message":"You need at least read:packages scope"}|gh: You need at least read:packages scope (HTTP 403)'
 GOT='0|ciwsbx.contracts.sbx01.rabc|'
-t "packages: none"                        PASS  "no earlier test packages for sbx01 deletes=0" "${RP}" '0||'
+t "packages: none"                        PASS  "no earlier test packages for sbx01 on GitHub Packages deletes=0" "${RP}" '0||'
 t "packages: list 404: none"              PASS  "deletes=0"           "${RP}" "${E404}"
 t "packages: another sandbox's kept"      PASS  "deletes=0"           "${RP}" '0|ciwsbx.contracts.sbx02.rabc|'
 t "packages: deleted, then 404"           PASS  "✓ earlier test package ciwsbx.contracts.sbx01.rabc gone (404) deletes=1" "${RP}" "${GOT}" '0||' "${E404}"
@@ -59,6 +59,52 @@ t "packages: list 502 x3: INFRA"          INFRA "INFRA: can't list GitHub Packag
 t "packages: list 403: FAIL, names scope" FAIL  "delete:packages"     "${RP}" "${E403}"
 t "packages: delete 403: FAIL"            FAIL  "can't delete package" "${RP}" "${GOT}" "${E403}"
 t "packages: still there after deleting"  FAIL  "still there 60s"     "${RP}" "${GOT}" '0||' '0|x|' '0|x|' '0|x|' '0|x|' '0|x|' '0|x|'
+
+# A Publish row's packages carry the sandbox and run: NuGet ids, and npm
+# names in package.json and its lock file alike.
+export PARTS="${HERE}/../parts"
+read -r -d '' NAMES <<'CODE'
+s="${WORK_ROW}/seed"; rm -rf "$s"; mkdir -p "$s/src/C"
+cp "${PARTS}/dotnet-lib/src/Contracts/Contracts.csproj" "$s/src/C/"; cp "${PARTS}/node-pkg/package.json" "${PARTS}/node-pkg/package-lock.json" "$s/"
+FEED=azure-org; SLOT=01; RUN_TAG=abc; name_test_packages "$s"
+echo "pk=[${TEST_PACKAGES[*]}] json=$(jq -r .name "$s/package.json") lock=$(jq -r '.name + "," + .packages[""].name' "$s/package-lock.json") csproj=$(grep -o '<PackageId>[^<]*' "$s/src/C/Contracts.csproj")"
+CODE
+t "names: nuget and npm, lock file too"   PASS  "pk=[nuget:ciwsbx.contracts.sbx01.rabc npm:@haam909/ciw-sbx-pkg.sbx01.rabc] json=@haam909/ciw-sbx-pkg.sbx01.rabc lock=@haam909/ciw-sbx-pkg.sbx01.rabc,@haam909/ciw-sbx-pkg.sbx01.rabc csproj=<PackageId>ciwsbx.contracts.sbx01.rabc" "${NAMES}"
+
+# azure-org names the org-scoped Feed on each package, in its runtime's URL.
+read -r -d '' FEEDS <<'CODE'
+m="${WORK_ROW}/m"; rm -rf "$m"; mkdir -p "$m/.github"; cd "$m" || exit 1
+printf '%s\n' 'components:' '  - {name: lib, runtime: dotnet, target: package}' '  - {name: pkg, runtime: node, target: package}' '  - {name: api, runtime: dotnet, target: appservice}' > .github/components.yml
+FEED=azure-org; AZDO_ORG=o; AZDO_FEED=f; manifest_feed > /dev/null
+echo "feeds=[$(yq '.components[] | .name + "=" + (.feed // "-")' .github/components.yml | paste -sd' ' -)]"
+CODE
+t "azure-org: the Feed per runtime"       PASS  "feeds=[lib=https://pkgs.dev.azure.com/o/_packaging/f/nuget/v3/index.json pkg=https://pkgs.dev.azure.com/o/_packaging/f/npm/registry/ api=-]" "${FEEDS}"
+
+# With an Azure Artifacts Feed set, a reset also deletes this sandbox's earlier
+# test packages there, version by version, through the recycle bin, to 404.
+RA='SLOT=01; PKG_API=user; AZDO_ORG=o; AZDO_FEED=f; reset_packages; echo "deletes=$(grep -c "^curl .*-X DELETE" "${FAKE_LOG}") purged=$(grep -c "npm/RecycleBin/packages/@haam909/ciw-sbx-pkg.sbx01.rabc/versions/" "${FAKE_LOG}") reg=$(grep -cE "_packaging/f/(npm/registry/@haam909%2Fciw-sbx-pkg.sbx01.rabc|nuget/v3/flat2/ciwsbx.contracts.sbx01.rabc/index.json)$" "${FAKE_LOG}")"'
+NONE='200|{"value":[]}|'
+NPM='200|{"value":[{"protocolType":"Npm","name":"@haam909/ciw-sbx-pkg.sbx01.rabc","versions":[{"version":"0.2.0-alpha.1"},{"version":"0.2.0"}]},{"protocolType":"Npm","name":"@haam909/ciw-sbx-pkg.sbx02.rabc","versions":[{"version":"0.2.0"}]}]}|'
+NUGET='200|{"value":[{"protocolType":"NuGet","name":"ciwsbx.contracts.sbx01.rabc","versions":[{"version":"0.2.0"}]}]}|'
+AZ404='404|{"message":"Package not found"}|'
+FORGOOD='200|{"permanentlyDeletedDate":"2026-10-12T16:11:05Z"}|'
+t "azure: none"                           PASS  "no earlier test packages for sbx01 on Azure Artifacts deletes=0" "${RA}" '0||' "${NONE}" "${NONE}" "${NONE}"
+t "azure: this sandbox's npm, 2 versions" PASS  "✓ earlier test package @haam909/ciw-sbx-pkg.sbx01.rabc gone (404) on Azure Artifacts deletes=4 purged=2 reg=1" \
+  "${RA}" '0||' "${NONE}" "${NONE}" "${NPM}" '200||' '200||' "${FORGOOD}" '200||' '200||' "${FORGOOD}" "${AZ404}"
+t "azure: nuget already in the bin"       PASS  "✓ earlier test package ciwsbx.contracts.sbx01.rabc gone (404) on Azure Artifacts deletes=2 purged=0 reg=1" \
+  "${RA}" '0||' "${NONE}" "${NONE}" "${NUGET}" "${AZ404}" '200||' "${AZ404}" "${AZ404}"
+t "azure: npm unpublish lands late"       PASS  "gone (404) on Azure Artifacts deletes=3 purged=2" \
+  "${RA}" '0||' "${NONE}" "${NONE}" '200|{"value":[{"protocolType":"Npm","name":"@haam909/ciw-sbx-pkg.sbx01.rabc","versions":[{"version":"0.2.0"}]}]}|' \
+  '200||' '404|{"error":"Package needs to be deleted before permanent deletion."}|' '200|{"unpublishedDate":"x"}|' '200||' "${FORGOOD}" "${AZ404}"
+t "azure: list refused: FAIL"             FAIL  "can't list Azure Artifacts feed o/f" "${RA}" '0||' '403|{"message":"no"}|'
+t "azure: sent to sign-in: FAIL, not none" FAIL "can't list Azure Artifacts feed o/f" "${RA}" '0||' '302||'
+t "azure: list 503 x3: INFRA"             INFRA "INFRA: can't list Azure Artifacts feed" "${RA}" '0||' '503||' '503||' '503||'
+t "azure: curl connection reset: retried" PASS  "no earlier test packages for sbx01 on Azure Artifacts" "${RA}" '0||' 'RESET' "${NONE}" "${NONE}" "${NONE}"
+t "azure: 200 but not a list: FAIL"       FAIL  "answered with no package list" "${RA}" '0||' '200|<html><title>Sign Out</title></html>|'
+t "azure: version never goes: FAIL"       FAIL  "still on Azure Artifacts 120s" \
+  "${RA}" '0||' "${NONE}" "${NONE}" "${NUGET}" '200||' '200||' '200|{}|' '200||' '200|{}|' '200||' '200|{}|' '200||' '200|{}|' '200||' '200|{}|' '200||' '200|{}|' '200||' '200|{}|' '200||' '200|{}|' '200||' '200|{}|' '200||' '200|{}|' '200||' '200|{}|' '200||' '200|{}|'
+t "azure: registry still has it: FAIL"    FAIL  "still in the Azure Artifacts nuget registry 120s" \
+  "${RA}" '0||' "${NONE}" "${NONE}" "${NUGET}" '200||' '200||' "${AZ404}" '200|{}|' '200|{}|' '200|{}|' '200|{}|' '200|{}|' '200|{}|' '200|{}|' '200|{}|' '200|{}|' '200|{}|' '200|{}|' '200|{}|'
 
 # Checks that never settle: one GitHub shows running after it finished is INFRA.
 OK_BN='{"name":"ci / branch-name","bucket":"pass","completedAt":"2026-10-10T15:23:19Z","link":"l/2"},{"name":"local/ci","bucket":"pass","completedAt":"0001-01-01T00:00:00Z","link":""}'
@@ -103,6 +149,14 @@ printf '%s\n' '0|o|' "${E403}" > "${FAKE_Q}"; : > "${FAKE_LOG}"
 out="$(WORK="${TMP}/work" RESULTS="${TMP}/results" bash "${HERE}/../run" P1 2>&1)"; rc=$?
 if [[ "${rc}" == 2 && "${out}" == *"delete:packages"* && "$(wc -l < "${FAKE_LOG}")" == 2 ]]; then ok=ok; else ok=WRONG; WRONG=$((WRONG + 1)); fi
 printf '%-5s %-44s rc=%s  %s\n' "${ok}" "run: packages 403: stops, names the scopes" "${rc}" "${out:0:100}"
+
+# run stops before any row when an Azure Artifacts row lacks the Feed or the app.
+printf '%s
+' '0|o|' '0||' > "${FAKE_Q}"; : > "${FAKE_LOG}"
+out="$(env -u AZDO_ORG -u AZDO_FEED -u AZURE_CLIENT_ID -u AZURE_TENANT_ID WORK="${TMP}/work" RESULTS="${TMP}/results" bash "${HERE}/../run" P3 2>&1)"; rc=$?
+if [[ "${rc}" == 2 && "${out}" == *"AZDO_ORG, AZDO_FEED"* ]]; then ok=ok; else ok=WRONG; WRONG=$((WRONG + 1)); fi
+printf '%-5s %-44s rc=%s  %s
+' "${ok}" "run: Azure row, no settings: stops" "${rc}" "${out:0:100}"
 
 echo "harness: ${WRONG} wrong"
 [[ "${WRONG}" == 0 ]]

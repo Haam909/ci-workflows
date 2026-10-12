@@ -46,6 +46,7 @@ t "tenant node, feed its own GPR"                octo.ghe.com node   "https://np
 t "tenant, github.com GPR is foreign"            octo.ghe.com dotnet "https://nuget.pkg.github.com/o/index.json" 1 "${REFUSED}" ""
 t "github.com, a tenant's GPR is foreign"        github.com   node   "https://npm.octo.ghe.com"                 1 "${REFUSED}" ""
 t "Azure Artifacts still by its hostnames"       octo.ghe.com dotnet "${AZ_FEED}"                               0 "Feed: Azure Artifacts" "add source ${AZ_FEED} "
+t "Azure Artifacts node, its npm registry"     github.com   node   "https://pkgs.dev.azure.com/x/_packaging/f/npm/registry/" 0 "Feed: Azure Artifacts" "--registry https://pkgs.dev.azure.com/x/_packaging/f/npm/registry/"
 t "python, no feed: refused"                     github.com   python ""                                         1 "Python packages need a 'feed'" ""
 
 echo "deliver: ${WRONG} wrong"

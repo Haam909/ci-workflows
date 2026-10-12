@@ -136,3 +136,60 @@ and would break whenever a Sandbox is recreated: repos created after
     ```
 
     [Flexible federated identity credentials: Azure CLI](https://learn.microsoft.com/en-us/entra/workload-id/workload-identities-flexible-federated-identity-credentials#azure-cli-azure-powershell-and-terraform-providers)
+
+12. Connect the Azure DevOps organization to the tenant. An organization
+    created while signed in with a personal Microsoft account isn't
+    connected to any directory, and then it refuses the Entra tokens that
+    `az` and `azure/login` get ("Identity … has not been materialized"), and
+    no service principal can be added to it. Check which directory it's
+    connected to; all zeros means none:
+
+    ```powershell
+    (Invoke-WebRequest https://dev.azure.com/<org>/_apis/connectionData -MaximumRedirection 0 -SkipHttpErrorCheck -ErrorAction SilentlyContinue).Headers['X-VSS-ResourceTenant']
+    ```
+
+    If it isn't `<tenant-id>`, go to **Organization settings** > **Microsoft
+    Entra ID** > **Connect directory**, pick the directory from step 7, select
+    **Connect**, then **Sign out**. Sign back in with the tenant's identity,
+    and under **Organization settings** > **Users**, **Resolve** your old
+    Microsoft account to it so you stay the organization's owner and the
+    Feeds' owner. Run the check again; it prints `<tenant-id>`.
+    [Connect your organization to Microsoft Entra ID](https://learn.microsoft.com/en-us/azure/devops/organizations/accounts/connect-organization-to-azure-ad?view=azure-devops#connect-your-organization-to-microsoft-entra-id),
+    [Service principals: prerequisites](https://learn.microsoft.com/en-us/azure/devops/integrate/get-started/authentication/service-principal-managed-identity?view=azure-devops#prerequisites)
+
+13. Find the app's service principal. Azure DevOps adds it by the service
+    principal's Object ID, which is not the one under **App registrations**.
+    In the Microsoft Entra admin center, go to **Entra ID** > **Enterprise
+    applications**, open the app from step 7, and note its **Object ID**.
+    [Use service principals and managed identities: create a service principal](https://learn.microsoft.com/en-us/azure/devops/integrate/get-started/authentication/service-principal-managed-identity?view=azure-devops#create-a-service-principal)
+
+14. Add the service principal to the Azure DevOps organization. At
+    `https://dev.azure.com/<org>`, go to **Organization settings** >
+    **Users** > **Add users**, enter the app's display name, choose
+    **Stakeholder** access (it includes Azure Artifacts, and costs nothing),
+    add it to the project from step 3, and select **Add**. No invitation is
+    sent.
+    [Add the identity to Azure DevOps](https://learn.microsoft.com/en-us/azure/devops/integrate/get-started/authentication/service-principal-managed-identity?view=azure-devops#add-the-identity-to-azure-devops),
+    [Access levels: Artifacts](https://learn.microsoft.com/en-us/azure/devops/organizations/security/access-levels?view=azure-devops#supported-access-levels)
+
+15. Let it publish to both Feeds. For each Feed, open **Artifacts**, pick the
+    Feed, select the gear icon for **Feed settings** > **Permissions** >
+    **Add users/groups**, add the service principal with the **Feed Publisher
+    (Contributor)** role, and select **Save**. Leave yourself **Feed Owner**:
+    only an owner can delete packages, and the harness deletes each
+    Sandbox's earlier test packages as you.
+    [Manage permissions: feed settings](https://learn.microsoft.com/en-us/azure/devops/artifacts/feeds/feed-permissions?view=azure-devops#feed-settings),
+    [Feed roles and permissions](https://learn.microsoft.com/en-us/azure/devops/artifacts/feeds/feed-permissions?view=azure-devops#feed-roles-and-permissions)
+
+16. Run the Azure Artifacts rows. `az` stays signed in from step 8; the
+    harness calls the Feed through `az rest` as you. Set the org and the
+    org-scoped Feed from steps 2 and 4, and the IDs from step 7:
+
+    ```bash
+    AZDO_ORG=<org> AZDO_FEED=<feed> AZURE_CLIENT_ID=<client-id> AZURE_TENANT_ID=<tenant-id> \
+      tests/onboard/run P3 P4
+    ```
+
+    `run` stops before any row if a setting is missing or `az` can't get an
+    Azure DevOps token.
+    [az rest](https://learn.microsoft.com/en-us/cli/azure/reference-index?view=azure-cli-latest#az-rest)

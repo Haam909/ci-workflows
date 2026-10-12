@@ -261,7 +261,10 @@ By hand:
    repo variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
    `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, plus `ACR_NAME` for
    `container`; and federated credentials for
-   `repo:ORG/REPO:environment:{test,release,production}`.
+   `repo:ORG/REPO:environment:{test,release,production}`. A repo whose only
+   Azure use is publishing to Azure Artifacts needs just `AZURE_CLIENT_ID`,
+   `AZURE_TENANT_ID` and the credentials: a package's `azure/login` asks for
+   no subscription.
 
 A repo whose components are all `package` on GitHub Packages needs no Azure
 configuration at all — `azure/login` is skipped.
@@ -315,14 +318,17 @@ Feed URLs differ per runtime — NuGet wants `.../nuget/v3/index.json`, npm
 `.../npm/registry/`, Python `.../pypi/upload/`.
 
 **Azure Artifacts setup.** Add the same service principal used for the Azure
-deploys to the Azure DevOps organisation as a user, and give it
-**Contributor** on the feed. No PAT is created or stored. The repo also needs
-the `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID` variables
-and the federated credentials from "Onboarding a repo", because the token
-comes from `azure/login`.
+deploys to the Azure DevOps organisation as a user (**Stakeholder** access is
+enough for Azure Artifacts), and give it **Feed Publisher (Contributor)** on
+the feed. No PAT is created or stored. The repo also needs the
+`AZURE_CLIENT_ID` and `AZURE_TENANT_ID` variables and the federated
+credentials from "Onboarding a repo", because the token comes from
+`azure/login`. It needs `AZURE_SUBSCRIPTION_ID` only if a component also
+deploys to Azure.
 
-This path hasn't been run end to end yet. Publishing to GitHub Packages has,
-for npm and NuGet; the first Azure Artifacts publish is the test of it.
+The onboard harness's rows `P3` (dotnet) and `P4` (node) publish to an
+org-scoped Feed end to end (`tests/onboard`). Python packages and
+project-scoped Feeds haven't been run yet.
 
 **Other feeds** (npmjs.org, PyPI, Artifactory, Nexus) can't use OIDC, so put
 the token in a repository secret and name it on the component:

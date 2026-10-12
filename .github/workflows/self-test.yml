@@ -34,7 +34,7 @@ jobs:
           shellcheck -x -P SCRIPTDIR -S warning -s bash \
             local/bin/onboard tests/onboard/run tests/onboard/stage tests/onboard/lib.sh tests/onboard/rows.sh \
             tests/onboard/offline/run tests/onboard/offline/onboard.sh tests/onboard/offline/harness.sh tests/onboard/offline/bin-ci.sh tests/onboard/offline/deliver.sh \
-            tests/onboard/offline/bin/gh tests/onboard/offline/bin/python
+            tests/onboard/offline/bin/gh tests/onboard/offline/bin/az tests/onboard/offline/bin/curl tests/onboard/offline/bin/python
       - run: bash tests/onboard/offline/run
 
   discover:

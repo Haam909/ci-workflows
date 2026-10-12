@@ -19,7 +19,7 @@ last_out() { sed 's/\x1b\[[0-9;]*m//g' "${WORK_ROW}/last.out"; }
 retried() { local try; for try in 1 2 3; do logged "$@" && return 0; transient_out || return 1; (( try < 3 )) && sleep 20; done; return 1; }
 # Did the last step fail on GitHub or the network rather than on what it tested?
 is_transient() {
-  grep -qiE 'HTTP 5[0-9]{2}|5[0-9]{2} (Bad Gateway|Service Unavailable|Gateway Time)|timed out|timeout|Could not resolve|Connection (reset|refused)|unable to access|repository is disabled|RPC failed|rate limit|TLS handshake|Sigstore verifier|ECONNRESET|ETIMEDOUT|couldn.t read .* from GitHub|can.t read .* from GitHub|can.t fetch'
+  grep -qiE 'HTTP 5[0-9]{2}|5[0-9]{2} (Bad Gateway|Service Unavailable|Gateway Time)|timed out|timeout|Could not resolve|Connection (reset|refused)|Connection was reset|Recv failure|curl: \((6|7|28|35|52|56)\)|unable to access|repository is disabled|RPC failed|rate limit|TLS handshake|Sigstore verifier|ECONNRESET|ETIMEDOUT|couldn.t read .* from GitHub|can.t read .* from GitHub|can.t fetch'
 }
 transient_out() { last_out | is_transient; }
 # A GitHub call whose output is wanted: tried again after a bad moment. A
@@ -110,11 +110,14 @@ sandbox_leftovers() {
 
 # A Publish row's packages are named <id>.sbx<slot>.r<run>: a sandbox reused
 # by the next run never meets a version the Feed already holds, and its reset
-# knows which packages are its own.
+# knows which packages are its own. TEST_PACKAGES holds <protocol>:<name>.
 PACKAGES_SCOPES="the gh token needs read:packages and delete:packages: gh auth refresh -h github.com -s read:packages,delete:packages"
+# The Azure DevOps resource: Feed calls are made as the operator, who owns
+# the Feed (only a Feed Owner can delete).
+AZDO_RESOURCE=499b84ac-1321-427f-aa17-267ca6975798
 
 name_test_packages() {   # seed dir
-  local f id new
+  local f id new lock
   TEST_PACKAGES=()
   [[ -n "${FEED}" ]] || return 0
   while IFS= read -r -d '' f; do
@@ -122,9 +125,44 @@ name_test_packages() {   # seed dir
     [[ -n "${id}" ]] || continue
     new="$(tr 'A-Z' 'a-z' <<< "${id}").sbx${SLOT}.r${RUN_TAG}"
     sed -i "s#<PackageId>${id}</PackageId>#<PackageId>${new}</PackageId>#" "$f"
-    TEST_PACKAGES+=("${new}")
+    TEST_PACKAGES+=("nuget:${new}")
   done < <(find "$1" -name '*.csproj' -print0)
-  note "test packages: ${TEST_PACKAGES[*]:-none}"
+  while IFS= read -r -d '' f; do
+    id="$(jq -r '.name // empty' "$f")"
+    [[ -n "${id}" ]] || continue
+    new="${id}.sbx${SLOT}.r${RUN_TAG}"
+    jq --arg n "${new}" '.name = $n' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    # The lock file names the package too, at the top and as the root package.
+    lock="$(dirname "$f")/package-lock.json"
+    if [[ -f "${lock}" ]]; then
+      jq --arg n "${new}" '.name = $n | if .packages[""] then .packages[""].name = $n else . end' "${lock}" > "${lock}.tmp" && mv "${lock}.tmp" "${lock}"
+    fi
+    TEST_PACKAGES+=("npm:${new}")
+  done < <(find "$1" -name package.json -not -path '*/node_modules/*' -print0)
+  note "test packages: $(printf '%s\n' "${TEST_PACKAGES[@]#*:}" | paste -sd' ' -)"
+}
+
+feed_label() { if [[ "${FEED}" == azure-* ]]; then echo "Azure Artifacts"; else echo "GitHub Packages"; fi; }
+
+# The Feed's packaging API, under its NuGet or npm protocol.
+azdo_pkgs() { echo "https://pkgs.dev.azure.com/${AZDO_ORG}/_apis/packaging/feeds/${AZDO_FEED}/$1"; }
+# An Azure DevOps call as the operator: az mints the token, curl makes the
+# call, so the outcome is the HTTP status. A redirect (to sign-in, for a token
+# Azure DevOps won't take) is a failure, not an answer. On failure the error
+# says "HTTP <status>", which not_found and is_transient read.
+azdo() {                 # method url
+  local tok code
+  tok="$(az account get-access-token --resource "${AZDO_RESOURCE}" --query accessToken -o tsv)" || return 1
+  code="$(curl -sS -o "${WORK_ROW}/azdo.out" -w '%{http_code}' -X "$1" -H "Authorization: Bearer ${tok}" "$2")" || return 1
+  if [[ "${code}" == 2* ]]; then cat "${WORK_ROW}/azdo.out"; return 0; fi
+  echo "Azure DevOps: HTTP ${code}: $(head -c 300 "${WORK_ROW}/azdo.out")" >&2
+  return 1
+}
+az_out() { gh_out azdo "$@"; }
+# A package version's REST path. An npm name may be @scope/name, which is
+# the path the scoped API takes.
+azdo_version_path() {    # protocol name version
+  case "$1" in nuget) echo "nuget/packages/$2/versions/$3" ;; npm) echo "npm/$2/versions/$3" ;; esac
 }
 
 # Delete the test packages an earlier row in this sandbox published; each must
@@ -137,7 +175,7 @@ reset_packages() {
     else fail_step "can't list GitHub Packages to delete earlier test packages"; return 1; fi
   fi
   names="$(grep -iE "\.sbx${SLOT}\.r[0-9a-z]+$" <<< "${names}")"
-  [[ -n "${names}" ]] || { note "no earlier test packages for sbx${SLOT}"; return 0; }
+  [[ -n "${names}" ]] || note "no earlier test packages for sbx${SLOT} on GitHub Packages"
   for n in ${names}; do
     if ! gh_out gh api -X DELETE "${PKG_API:-user}/packages/nuget/${n}" > /dev/null && ! not_found; then
       if last_out | grep -q 'HTTP 403'; then fail "can't delete package ${n}: ${PACKAGES_SCOPES}"; else fail_step "deleting package ${n} failed"; fi
@@ -152,19 +190,126 @@ reset_packages() {
     [[ "${gone}" == true ]] || { fail "earlier test package ${n} still there 60s after deleting it"; return 1; }
     pass "earlier test package ${n} gone (404)"
   done
+  if [[ -n "${AZDO_ORG:-}" ]]; then reset_azure_packages || return 1; fi
+}
+
+# The same on the Azure Artifacts Feed. Each version goes to the Feed's
+# recycle bin, then out of it for good; then each package must answer 404
+# where its package manager reads it.
+reset_azure_packages() {
+  local q out list="" proto name v path gone try
+  # The REST reference says NuGet lists only stable versions by default
+  # (isRelease); ask with isRelease both ways so no prerelease is missed.
+  # includeDeleted finds the recycle bin's.
+  for q in "protocolType=NuGet&isRelease=true" "protocolType=NuGet&isRelease=false" "protocolType=Npm"; do
+    out="$(az_out GET "https://feeds.dev.azure.com/${AZDO_ORG}/_apis/packaging/Feeds/${AZDO_FEED}/packages?${q}&packageNameQuery=.sbx${SLOT}.r&includeAllVersions=true&includeDeleted=true&includeUrls=false&api-version=7.1")" \
+      || { fail_step "can't list Azure Artifacts feed ${AZDO_ORG}/${AZDO_FEED} to delete earlier test packages"; return 1; }
+    # Anything but a package list is not "no packages".
+    jq -e '.value | type == "array"' <<< "${out}" > /dev/null 2>&1 \
+      || { fail "Azure Artifacts feed ${AZDO_ORG}/${AZDO_FEED} answered with no package list: $(head -c 120 <<< "${out}" | tr '\n' ' ')"; return 1; }
+    list+="$(jq -r '.value[] | (.protocolType | ascii_downcase) as $p | .name as $n | .versions[] | "\($p) \($n) \(.version)"' <<< "${out}")"$'\n'
+  done
+  list="$(grep -iE "^[a-z]+ [^ ]*\.sbx${SLOT}\.r[0-9a-z]+ " <<< "${list}" | sort -u)"
+  [[ -n "${list}" ]] || { note "no earlier test packages for sbx${SLOT} on Azure Artifacts"; return 0; }
+  while read -r proto name v; do
+    path="$(azdo_version_path "${proto}" "${name}" "${v}")"
+    # Already in the recycle bin answers 404 here; it's purged next either way.
+    if ! az_out DELETE "$(azdo_pkgs "${path}")?api-version=7.1" > /dev/null && ! not_found; then
+      fail_step "deleting ${name} ${v} from Azure Artifacts failed: $(last_out | grep . | tail -1)"; return 1
+    fi
+    gone=false
+    for try in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      # Out of the recycle bin, tried each time round: an npm unpublish lands
+      # a moment later, and until then the bin answers 404 ("needs to be
+      # deleted before permanent deletion"), as it does once it's purged.
+      az_out DELETE "$(azdo_pkgs "${proto}/RecycleBin/packages/${name}/versions/${v}")?api-version=7.1-preview.1" > /dev/null \
+        || not_found || { fail_step "purging ${name} ${v} from the Azure Artifacts recycle bin failed: $(last_out | grep . | tail -1)"; return 1; }
+      azdo_version_gone "${proto}" "${path}"
+      case $? in 0) gone=true; break ;; 1) sleep 10 ;; *) fail_step "can't read ${name} ${v} on Azure Artifacts after deleting it"; return 1 ;; esac
+    done
+    [[ "${gone}" == true ]] || { fail "earlier test package ${name} ${v} still on Azure Artifacts 120s after deleting it"; return 1; }
+    note "deleted ${name} ${v} from Azure Artifacts for good"
+  done <<< "${list}"
+  # What a consumer's restore or install reads must then know nothing of it.
+  while read -r proto name; do
+    gone=false
+    for try in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      if az_out GET "$(azdo_registry "${proto}" "${name}")" > /dev/null; then sleep 10; continue; fi
+      not_found || { fail_step "can't read ${name} from the Azure Artifacts ${proto} registry"; return 1; }
+      gone=true; break
+    done
+    [[ "${gone}" == true ]] || { fail "earlier test package ${name} still in the Azure Artifacts ${proto} registry 120s after deleting it"; return 1; }
+    pass "earlier test package ${name} gone (404) on Azure Artifacts"
+  done < <(cut -d' ' -f1,2 <<< "${list}" | sort -u)
+}
+
+# Is a deleted version gone for good? 0 yes, 1 not yet, 2 can't tell. Read
+# without showDeleted: with it, a NuGet version deleted for good still
+# answers 200. npm answers 200 regardless, and says so in permanentlyDeletedDate.
+azdo_version_gone() {    # protocol path
+  local out
+  if out="$(az_out GET "$(azdo_pkgs "$2")?api-version=7.1")"; then
+    [[ "$1" == npm && -n "$(jq -r '.permanentlyDeletedDate // empty' <<< "${out}" 2> /dev/null)" ]] && return 0
+    return 1
+  fi
+  not_found && return 0
+  return 2
+}
+
+# Where a package manager reads a package: NuGet's flat container index, the
+# npm package document (a scoped name's slash escaped).
+azdo_registry() {        # protocol name
+  local base="https://pkgs.dev.azure.com/${AZDO_ORG}/_packaging/${AZDO_FEED}"
+  case "$1" in
+    nuget) echo "${base}/nuget/v3/flat2/${2,,}/index.json" ;;
+    npm)   echo "${base}/npm/registry/${2/\//%2F}" ;;
+  esac
 }
 
 # The Feed holds this version of a test package.
-on_feed() {              # name version
-  gh api "${PKG_API:-user}/packages/nuget/$1/versions?per_page=100" --jq '.[].name' 2> /dev/null | grep -qxF "$2"
+on_feed() {              # protocol:name version
+  local proto="${1%%:*}" name="${1#*:}"
+  if [[ "${FEED}" == azure-* ]]; then
+    azdo GET "$(azdo_pkgs "$(azdo_version_path "${proto}" "${name}" "$2")")?api-version=7.1" 2> /dev/null \
+      | jq -r '.version' 2> /dev/null | grep -qxF "$2"
+  else
+    gh api "${PKG_API:-user}/packages/${proto}/${name}/versions?per_page=100" --jq '.[].name' 2> /dev/null | grep -qxF "$2"
+  fi
 }
 
 feed_holds() {           # version when
-  local n
+  local p where; where="$(feed_label)"
   [[ ${#TEST_PACKAGES[@]} -gt 0 ]] || { fail "no test packages named for this row"; return 1; }
-  for n in "${TEST_PACKAGES[@]}"; do
-    wait_for 300 "${n} $1 on GitHub Packages" on_feed "${n}" "$1" && pass "${n} $1 on GitHub Packages ($2)"
+  for p in "${TEST_PACKAGES[@]}"; do
+    wait_for 300 "${p#*:} $1 on ${where}" on_feed "${p}" "$1" && pass "${p#*:} $1 on ${where} ($2)"
   done
+}
+
+# An Azure Artifacts row's sandbox logs in with the app's IDs and no
+# subscription; any other row's has no Azure variables at all.
+azure_variables() {
+  local v names
+  for v in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+    gh_out gh api -X DELETE "repos/${REPO}/actions/variables/${v}" > /dev/null || not_found \
+      || { fail_step "deleting ${REPO}'s ${v} variable failed"; return 1; }
+  done
+  [[ "${FEED}" == azure-* ]] || return 0
+  for v in AZURE_CLIENT_ID AZURE_TENANT_ID; do
+    gh_out gh api -X POST "repos/${REPO}/actions/variables" -f name="${v}" -f value="${!v}" > /dev/null \
+      || { fail_step "setting ${REPO}'s ${v} variable failed"; return 1; }
+  done
+  names="$(gh_out gh api "repos/${REPO}/actions/variables" --jq '[.variables[].name] | join(" ")')" \
+    || { fail_step "can't list ${REPO}'s variables"; return 1; }
+  [[ " ${names} " != *" AZURE_SUBSCRIPTION_ID "* ]] || { fail "${REPO} has an AZURE_SUBSCRIPTION_ID variable"; return 1; }
+  pass "repo variables: ${names}; no AZURE_SUBSCRIPTION_ID"
+}
+
+# Every azure/login step in a run's jobs matching a regex succeeded.
+azure_login_ok() {       # run job-regex what
+  local c
+  c="$(gh_out gh run view "$1" -R "${REPO}" --json jobs --jq "[.jobs[] | select(.name | sub(\"^ci / \"; \"\") | test(\"$2\")) | .steps[] | select(.name | test(\"azure/login\")) | .conclusion] | unique | join(\",\")")" \
+    || { fail_step "can't read run $1's steps"; return 1; }
+  if [[ "${c}" == success ]]; then pass "$3: azure/login succeeded without a subscription"; else fail "$3: azure/login: ${c:-never ran}"; fi
 }
 
 assemble_seed() {        # dir
@@ -372,7 +517,9 @@ expected_manifest() {    # prints "name runtime target path" per part
       dotnet-func)  echo "func dotnet function ." ;;
       dotnet-lib)   echo "contracts dotnet package ." ;;
       node-web)     echo "web node app-service src/web" ;;
-      node-pkg)     echo "ciw-sbx-pkg node package ." ;;     # from package.json
+      # From package.json, which a Publish row names per run (name_test_packages).
+      node-pkg)     if [[ -n "${FEED}" ]]; then echo "ciw-sbx-pkg-sbx${SLOT}-r${RUN_TAG} node package ."
+                    else echo "ciw-sbx-pkg node package ."; fi ;;
       py-func)      echo "${name} python function ." ;;
       py-pkg)       echo "sdk python package src/sdk" ;;
       py-container) echo "worker python container src/worker" ;;
@@ -464,6 +611,23 @@ wait_for_checks() {      # pr
   done
 }
 
+# A Publish row whose Feed the manifest names: each package's `feed`, as a
+# Consuming repo would write it.
+manifest_feed() {
+  if [[ "${FEED}" == github-named ]]; then
+    # github.com's GitHub Packages, named as a Consuming repo would name it.
+    FEED_URL="https://nuget.pkg.github.com/${OWNER}/index.json" \
+      yq -i '(.components[] | select(.target == "package")).feed = strenv(FEED_URL)' .github/components.yml
+    note "manifest names feed https://nuget.pkg.github.com/${OWNER}/index.json"
+  elif [[ "${FEED}" == azure-org ]]; then
+    # The org-scoped Feed: no project in its URLs, which differ per runtime.
+    AZ="https://pkgs.dev.azure.com/${AZDO_ORG}/_packaging/${AZDO_FEED}" yq -i '
+      (.components[] | select(.target == "package" and .runtime == "dotnet")).feed = strenv(AZ) + "/nuget/v3/index.json" |
+      (.components[] | select(.target == "package" and .runtime == "node")).feed = strenv(AZ) + "/npm/registry/"' .github/components.yml
+    note "manifest names feed $(yq '[.components[] | select(.feed) | .feed] | join(" ")' .github/components.yml)"
+  fi
+}
+
 onboard_repo() {
   log "onboard init"
   if ! run_onboard init; then
@@ -472,12 +636,7 @@ onboard_repo() {
   fi
   check_manifest
   sed -i 's/   # onboard: check this//' .github/components.yml
-  if [[ "${FEED}" == github-named ]]; then
-    # github.com's GitHub Packages, named as a Consuming repo would name it.
-    FEED_URL="https://nuget.pkg.github.com/${OWNER}/index.json" \
-      yq -i '(.components[] | select(.target == "package")).feed = strenv(FEED_URL)' .github/components.yml
-    note "manifest names feed https://nuget.pkg.github.com/${OWNER}/index.json"
-  fi
+  manifest_feed
   dev_setup
 
   local pass_no
@@ -587,7 +746,9 @@ merge_publish() {
   c="$(job_conclusion "${run}" ' -> test$')" || { fail_step "can't read the merge run's jobs"; return 1; }
   [[ "${c}" == success ]] && pass "merge run delivered to test" || { fail "merge run's deliver jobs: ${c:-no conclusion}"; return 1; }
   c="$(gh_out gh run view "${run}" -R "${REPO}" --log)" || { fail_step "can't read the merge run's log"; return 1; }
-  grep -q 'Feed: GitHub Packages' <<< "${c}" && pass "merge run log: Feed: GitHub Packages" || fail "merge run log has no 'Feed: GitHub Packages'"
+  local where; where="$(feed_label)"
+  grep -q "Feed: ${where}" <<< "${c}" && pass "merge run log: Feed: ${where}" || fail "merge run log has no 'Feed: ${where}'"
+  [[ "${FEED}" != azure-* ]] || azure_login_ok "${run}" ' -> test$' "merge run"
   feed_holds "${want}" merge
 }
 
@@ -677,6 +838,7 @@ release() {
 
   c="$(job_conclusion "${run}" '^promote')" || { fail_step "can't read the release run's jobs"; return 1; }
   [[ "${c}" == success ]] && pass "promoted to production" || { fail "promote: ${c:-no conclusion}"; return 1; }
+  [[ "${FEED}" != azure-* ]] || azure_login_ok "${run}" '^promote' "promote"
   c="$(job_conclusion "${run}" '^publish release')" || { fail_step "can't read the release run's jobs"; return 1; }
   [[ "${c}" == success ]] || { fail "publish release: ${c:-no conclusion}"; return 1; }
   c="$(gh_out gh release view "v${VERSION}" -R "${REPO}" --json isDraft --jq .isDraft)" || { fail_step "can't read release v${VERSION}"; return 1; }
@@ -762,7 +924,7 @@ run_row() {
   local rc=0
   (
     # Setup is all GitHub calls; a row-specific refusal (visibility) is a fail of its own.
-    ensure_repo && reset_repo || { [[ "${ROW_FAILED}" == true ]] || infra "sandbox setup failed"; exit_row; }
+    ensure_repo && reset_repo && azure_variables || { [[ "${ROW_FAILED}" == true ]] || infra "sandbox setup failed"; exit_row; }
     push_seed || exit_row
     apply_protection || exit_row
     retried git clone -q "https://github.com/${REPO}.git" "${WORK_ROW}/repo" || { fail_step "clone failed: $(last_out | tail -1)"; exit_row; }

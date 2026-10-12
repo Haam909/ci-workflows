@@ -17,6 +17,11 @@
 #   PRIVATE_POOL     number of private sandboxes, for private rows (default: 2)
 #   WORK, RESULTS    where clones/logs and results go
 #   RUN_ID           names this run's directories (default: UTC time and pid)
+#   AZDO_ORG, AZDO_FEED              the org-scoped Azure Artifacts Feed, for
+#                                    Azure Artifacts rows; set, every reset
+#                                    also deletes earlier test packages there
+#   AZURE_CLIENT_ID, AZURE_TENANT_ID the Entra app Azure Artifacts rows' sandboxes
+#                                    log in with (tests/onboard/SANDBOXES.md)
 #
 # Rows run in a pool of sandbox repos, ${OWNER}/ciw-sbx-01..${POOL:-10}, and
 # private rows in ${OWNER}/ciw-sbx-p01..${PRIVATE_POOL:-2}, each reset (not
@@ -25,7 +30,8 @@
 # results/<row>.md is the latest; clones and logs to $WORK/<run-id>/<row>/.
 #
 # Needs: bash, git, gh (repo, workflow, read:packages and delete:packages
-# scopes), yq, jq, dotnet, node, python.
+# scopes), yq, jq, dotnet, node, python; az (signed in as an owner of the
+# Feed) and curl, for Azure Artifacts rows.
 
 set -uo pipefail
 
@@ -53,7 +59,7 @@ source "${HERE}/rows.sh"
 source "${HERE}/lib.sh"
 
 case "${1:-}" in
-  ""|-h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  ""|-h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   --list) declare -F | sed -n 's/^declare -f row_//p'; exit 0 ;;
   --all)  mapfile -t ROWS < <(declare -F | sed -n 's/^declare -f row_//p') ;;
   *)      ROWS=("$@") ;;
@@ -64,6 +70,19 @@ for t in git gh yq jq dotnet node npm python; do command -v "$t" > /dev/null || 
 # Read first: under pipefail, gh's own failure would decide a piped grep.
 if grep -q 'HTTP 403' <<< "$(gh api "${PKG_API}/packages?package_type=nuget&per_page=1" 2>&1)"; then
   echo "can't list ${OWNER}'s GitHub Packages; ${PACKAGES_SCOPES}" >&2; exit 2
+fi
+# Azure Artifacts rows need the Feed and the app, and az to reach the Feed.
+for row in "${ROWS[@]}"; do
+  declare -F "row_${row}" > /dev/null || continue
+  if (FEED=""; "row_${row}"; [[ "${FEED}" == azure-* ]]); then
+    [[ -n "${AZDO_ORG:-}" && -n "${AZDO_FEED:-}" && -n "${AZURE_CLIENT_ID:-}" && -n "${AZURE_TENANT_ID:-}" ]] \
+      || { echo "row ${row}: Azure Artifacts rows need AZDO_ORG, AZDO_FEED, AZURE_CLIENT_ID and AZURE_TENANT_ID (tests/onboard/SANDBOXES.md)" >&2; exit 2; }
+  fi
+done
+if [[ -n "${AZDO_ORG:-}" ]]; then
+  for t in az curl; do command -v "$t" > /dev/null || { echo "$t is required with AZDO_ORG set" >&2; exit 2; }; done
+  az account get-access-token --resource "${AZDO_RESOURCE}" -o none 2> /dev/null \
+    || { echo "az can't get an Azure DevOps token; az login --tenant <tenant-id>" >&2; exit 2; }
 fi
 mkdir -p "${WORK_RUN}" "${RESULTS_RUN}"
 
