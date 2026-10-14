@@ -51,7 +51,7 @@ post() {
 if [[ "${WAIT}" == true ]]; then
   # A status can't be posted until GitHub has the commit, and pre-push runs
   # before the objects arrive. Retry briefly rather than racing the push.
-  for i in $(seq 1 15); do
+  for _ in $(seq 1 15); do
     if post 2> /dev/null; then
       echo "Signed off ${SHA:0:7} as ${CONTEXT}=${STATE}"
       exit 0

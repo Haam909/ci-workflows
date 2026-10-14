@@ -22,10 +22,7 @@ actions/
 SETUP-GITHUB.md                step-by-step setup, no prior CI experience assumed
 LOCAL-GATE.md                  pre-push hook, local unit tests, signoff
 tests/                         self-test manifest and fixture projects
-  onboard/                     onboards real sandbox repos in every configuration
-                               and runs PR → merge → release on each (README there)
-local/                         bin/ci, bin/signoff, pre-push hook to copy into a repo;
-                               bin/onboard, which sets a repo up
+local/                         bin/ci, bin/signoff, pre-push hook to copy into a repo
 examples/.github/              copy into a consuming repo as-is
   components.yml               the manifest
   workflows/
@@ -208,65 +205,6 @@ Without `--signer-repo` it fails with `verifying with issuer "sigstore.dev"`.
 
 ## Onboarding a repo
 
-`local/bin/onboard` does steps 1–6 below and the two rulesets ("Rulesets"),
-drafting step 2's `components.yml` for you to review. Run it from the repo's
-clone, on its default branch (`main`, `master`, whatever the repo uses; the
-triggers are written for that branch):
-
-```bash
-../ci-workflows/local/bin/onboard init    # files, gate, lock files; drafts components.yml
-#   review .github/components.yml, delete each "# onboard: check this" marker
-../ci-workflows/local/bin/onboard apply   # bin/ci, land the files, v0.1.0,
-                                          # environments, both rulesets, then check
-../ci-workflows/local/bin/onboard check   # any time: what's missing or different
-```
-
-Options, for all three commands:
-
-- `--reviewer WHO` sets who approves releases: `LOGIN`, `user:LOGIN` or
-  `team:ORG/SLUG`, repeatable up to GitHub's limit of 6. Default: you.
-- `--no-deploy-to-test` leaves out the merge trigger, for a repo with nowhere
-  to deploy yet.
-- `--ref REF` is the ci-workflows ref the triggers call (default `v2`).
-
-It's safe to re-run. It adds what's missing and never overwrites an existing
-workflow, environment or ruleset; `check` names any that differ. Azure
-(step 7) stays manual.
-
-How `apply` lands the files depends on what protects the default branch,
-which it reads first: every ruleset in effect (the repo's and any org's) and
-classic branch protection.
-
-- **Unprotected:** one commit, pushed directly.
-- **Changes only through pull requests:** the commit goes to
-  `chore/onboard-ci` and a PR is opened; `apply` stops. Run it again once the
-  checks are green. It merges with the first method the repo allows (squash,
-  rebase, then merge commit) and carries on. If the PR can't be merged yet it
-  says why instead:
-  - the default branch moved on: it rebases the branch and pushes it, which
-    re-runs `bin/ci` and the signoff (pre-push), then stops again;
-  - an approval or a required check is outstanding: it lists them and exits
-    with status 3;
-  - conflicts: it names them and stops.
-- A `chore/onboard-ci` left on origin from an earlier attempt is reused if it
-  holds the same files, and its PR reopened. A branch of that name with
-  anything else on it stops `apply`, naming it; nothing is overwritten.
-
-The onboarding commit's subject is `ci: onboard to ci-workflows`, and the merge
-trigger skips commits with that subject, so adding the trigger doesn't deploy,
-whichever way it was merged. Nothing else is skipped: the PR's checks run.
-
-`check` also reports what the repo's settings and plan allow:
-
-- Actions disabled, or an allow-list without `Haam909/ci-workflows/*`;
-- required checks nothing in ci-workflows posts, which would hold every PR;
-- linear history required while only merge commits are allowed, which no PR
-  can satisfy;
-- features the plan doesn't offer, marked `!` rather than failed. For example
-  a private repo on GitHub Free gets no environment reviewers.
-
-By hand:
-
 1. Copy `examples/.github/` into the repo root. Keep the `permissions:` block
    in each trigger: a repo whose default token is read-only (the default for
    new repos) otherwise fails at startup with "The workflow is requesting …
@@ -353,9 +291,8 @@ credentials from "Onboarding a repo", because the token comes from
 `azure/login`. It needs `AZURE_SUBSCRIPTION_ID` only if a component also
 deploys to Azure.
 
-The onboard harness's rows `P3` (dotnet) and `P4` (node) publish to an
-org-scoped Feed end to end (`tests/onboard`). Python packages and
-project-scoped Feeds haven't been run yet.
+Publishing a dotnet and a node package to an org-scoped Feed has been run
+end to end. Python packages and project-scoped Feeds haven't.
 
 **Other feeds** (npmjs.org, PyPI, Artifactory, Nexus) can't use OIDC, so put
 the token in a repository secret and name it on the component:

@@ -20,22 +20,3 @@ _Avoid_: registry, repository, source
 A repo that calls ci-workflows through the trigger workflows and holds a component manifest.
 _Avoid_: consumer, client repo
 
-## Testing
-
-**Row**:
-One configuration in the onboard harness, run end to end on a Sandbox from onboarding to a release.
-_Avoid_: case, scenario
-
-**Sandbox**:
-A reusable test repo from the harness's pool, reset before each Row runs in it.
-_Avoid_: test repo, fixture repo
-
-**Publish row**:
-A Row whose release publishes a package to a Feed.
-
-**Install row**:
-A Row with a component that installs a package from a Feed, filled earlier by a Publish row.
-_Avoid_: consumer row
-
-**Probe**:
-A one-off workflow run on a new Host to find which capabilities (Feeds, attestation, signing, Azure login, cross-host calls) work there before any Rows target it.

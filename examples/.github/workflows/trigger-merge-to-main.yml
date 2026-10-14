@@ -16,8 +16,8 @@ permissions:
   packages: write
 jobs:
   ci:
-    # The commit that adds this file (local/bin/onboard) has nothing to deploy
-    # yet; whichever way it was merged, its subject starts with this.
+    # A commit with this subject is the one that adds these triggers; it has
+    # nothing to deploy yet, so skip it however it was merged.
     if: "!startsWith(github.event.head_commit.message, 'ci: onboard to ci-workflows')"
     uses: Haam909/ci-workflows/.github/workflows/reusable-deploy-to-test.yml@v2
     secrets: inherit

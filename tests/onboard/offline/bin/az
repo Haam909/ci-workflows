@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# A fake az for the offline tests: hands out a token, and logs it.
-echo "az $*" >> "${FAKE_LOG}"
-[[ "$*" == "account get-access-token "* ]] && { echo tok; exit 0; }
-echo "fake az: unexpected call: $*" >&2; exit 1
