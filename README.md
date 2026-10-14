@@ -227,7 +227,7 @@ Options, for all three commands:
   `team:ORG/SLUG`, repeatable up to GitHub's limit of 6. Default: you.
 - `--no-deploy-to-test` leaves out the merge trigger, for a repo with nowhere
   to deploy yet.
-- `--ref REF` is the ci-workflows ref the triggers call (default `v1`).
+- `--ref REF` is the ci-workflows ref the triggers call (default `v2`).
 
 It's safe to re-run. It adds what's missing and never overwrites an existing
 workflow, environment or ruleset; `check` names any that differ. Azure
@@ -433,17 +433,17 @@ an active rule blocks the release's own tag push.
 ## Versioning this repo
 
 Change this repo through a pull request. `self-test.yml` builds each fixture
-in `tests/components.yml` with the actions from that branch (not `@v1`) and
+in `tests/components.yml` with the actions from that branch (not `@v2`) and
 checks the artifact's name and contents and the SBOM's root version and
 component list. It covers every runtime with the `app-service` and `package`
-targets, and needs no consumer repo, release or Azure. Move `v1` only after it
+targets, and needs no consumer repo, release or Azure. Move `v2` only after it
 passes on `main`. Container builds aren't covered: they need a registry.
 
-Consumers pin `@v1`. Move `v1` forward for compatible changes; cut `v2` for
+Consumers pin `@v2`. Move `v2` forward for compatible changes; cut `v3` for
 anything needing manifest changes — thirty repos means a breaking change here
 is thirty PRs, so prefer additive keys with defaults.
 
-The `Haam909/ci-workflows/...@v1` references inside the workflows and the
+The `Haam909/ci-workflows/...@v2` references inside the workflows and the
 examples point at the account this copy was set up under. Substitute your org
 name when moving it (SETUP-GITHUB.md step 2).
 

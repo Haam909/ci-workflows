@@ -99,6 +99,6 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: Haam909/ci-workflows/actions/check-branch-name@v1
+      - uses: Haam909/ci-workflows/actions/check-branch-name@v2
         with:
           branch: ${{ github.head_ref }}

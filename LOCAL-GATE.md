@@ -239,7 +239,7 @@ behaviour and it will still annoy people the first few times.
 
 **The scripts are copies.** Each repo has its own `bin/ci`, so thirty repos
 means thirty copies that can drift from the version here. Re-copy them when
-you move the `v1` tag.
+you move the `v2` tag.
 
 **Pre-push can't post the status.** The API rejects a status for a commit
 GitHub hasn't seen, and git has no post-push hook, so the hook spawns a short

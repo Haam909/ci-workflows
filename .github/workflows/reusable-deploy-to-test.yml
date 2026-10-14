@@ -51,7 +51,7 @@ jobs:
       - id: read
         run: echo "components=$(yq -o=json -I=0 '.components' '${{ inputs.manifest }}')" >> "$GITHUB_OUTPUT"
       - id: version
-        uses: Haam909/ci-workflows/actions/derive-version@v1
+        uses: Haam909/ci-workflows/actions/derive-version@v2
         with:
           sha: ${{ github.sha }}
           prerelease: 'true'
@@ -71,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: Haam909/ci-workflows/actions/install-toolchain@v1
+      - uses: Haam909/ci-workflows/actions/install-toolchain@v2
         with:
           component: ${{ toJSON(matrix.component) }}
           node-version: ${{ inputs.node-version }}
@@ -81,7 +81,7 @@ jobs:
       # The developer machines ran these before the merge; this is the
       # backstop for two machines with the same stale SDK. A failing component
       # isn't deployed; the others still are (fail-fast is off).
-      - uses: Haam909/ci-workflows/actions/run-tests@v1
+      - uses: Haam909/ci-workflows/actions/run-tests@v2
         with:
           component: ${{ toJSON(matrix.component) }}
           manifest: ${{ inputs.manifest }}
@@ -103,13 +103,13 @@ jobs:
         run: az acr login --name "${{ vars.ACR_NAME }}"
 
       - id: build
-        uses: Haam909/ci-workflows/actions/build-artifact@v1
+        uses: Haam909/ci-workflows/actions/build-artifact@v2
         with:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ needs.discover.outputs.version }}
           registry: ${{ vars.ACR_NAME && format('{0}.azurecr.io', vars.ACR_NAME) || '' }}
 
-      - uses: Haam909/ci-workflows/actions/deliver-artifact@v1
+      - uses: Haam909/ci-workflows/actions/deliver-artifact@v2
         with:
           component: ${{ toJSON(matrix.component) }}
           artifact: ${{ steps.build.outputs.artifact }}

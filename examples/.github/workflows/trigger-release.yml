@@ -27,7 +27,7 @@ permissions:
   attestations: write
 jobs:
   ci:
-    uses: Haam909/ci-workflows/.github/workflows/reusable-release.yml@v1
+    uses: Haam909/ci-workflows/.github/workflows/reusable-release.yml@v2
     with:
       major: ${{ inputs.major }}
       sha: ${{ inputs.sha }}

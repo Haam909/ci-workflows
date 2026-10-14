@@ -141,7 +141,7 @@ jobs:
           echo "Manifest at ${SHA:0:7}: ${COMPONENTS}"
 
       - id: version
-        uses: Haam909/ci-workflows/actions/derive-version@v1
+        uses: Haam909/ci-workflows/actions/derive-version@v2
         with:
           sha: ${{ steps.target.outputs.sha }}
           force-major: ${{ inputs.major }}
@@ -172,7 +172,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
 
-      - uses: Haam909/ci-workflows/actions/install-toolchain@v1
+      - uses: Haam909/ci-workflows/actions/install-toolchain@v2
         with:
           component: ${{ toJSON(matrix.component) }}
           node-version: ${{ inputs.node-version }}
@@ -195,7 +195,7 @@ jobs:
       # Locked installs are what make this rebuild from the tested commit
       # resolve to the same dependencies, rather than checking afterwards.
       - id: build
-        uses: Haam909/ci-workflows/actions/build-artifact@v1
+        uses: Haam909/ci-workflows/actions/build-artifact@v2
         with:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ needs.resolve.outputs.version }}
@@ -204,7 +204,7 @@ jobs:
       # ---------- SBOM: release deliverable, generated once, here ----------
 
       - name: SBOM
-        uses: Haam909/ci-workflows/actions/generate-sbom@v1
+        uses: Haam909/ci-workflows/actions/generate-sbom@v2
         with:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ needs.resolve.outputs.version }}

@@ -179,7 +179,7 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           allow-no-subscriptions: ${{ matrix.component.target == 'package' }}
 
-      - uses: Haam909/ci-workflows/actions/deliver-artifact@v1
+      - uses: Haam909/ci-workflows/actions/deliver-artifact@v2
         with:
           component: ${{ toJSON(matrix.component) }}
           artifact: ${{ steps.artifact.outputs.path }}
