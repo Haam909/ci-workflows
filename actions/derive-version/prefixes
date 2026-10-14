@@ -1,6 +1,6 @@
 # Branch prefixes and the version bump each one asks for. The one list:
-# derive-version, the PR gate's branch-name check and local/bin/onboard's
-# branch naming ruleset all read it.
+# derive-version and the PR gate's branch-name check read it; the branch
+# naming ruleset (README.md, "Rulesets") lists the same prefixes.
 breaking    major
 feature     minor
 feat        minor

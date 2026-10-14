@@ -129,10 +129,6 @@ anything" — your app repo is still running the old tagged version.
 
 ## Step 4 — Set up your app repo
 
-Steps 4 to 8 can be done by a script: `local/bin/onboard` (README.md,
-"Onboarding a repo"). The steps below are what it does, for doing it by hand
-or understanding the result.
-
 In the repo you want to build, copy the `examples/.github/` folder from this
 project to your repo root. You should end up with:
 
@@ -471,7 +467,7 @@ The token wasn't allowed to do something. Check the trigger file's
 The trigger doesn't grant `pull-requests: read`. A public repo's PRs can be
 read without it; a private or internal repo's can't, and the version bump
 comes from the merged PRs' branches. Add it to the trigger's `permissions:`
-block, as in `examples/`. `onboard check` reports it.
+block, as in `examples/`.
 
 **"No successful deployment to test found"**
 You ran Release with **sha** blank before ever merging to main. Merge
