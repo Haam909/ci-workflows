@@ -19,3 +19,7 @@ jobs:
   ci:
     uses: Haam909/ci-workflows/.github/workflows/reusable-verify-pull-request.yml@v1
     secrets: inherit
+    # Two people must sign a commit off: the author (pre-push hook) and a
+    # reviewer (bin/ci, then bin/signoff). Working alone, require one:
+    # with:
+    #   signoffs: 1
