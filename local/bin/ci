@@ -3,6 +3,8 @@
 #
 #   bin/ci                 the full gate: lint, typecheck, unit, integration
 #   bin/ci --quick         unit tests only — fast loop while coding, NOT a gate run
+#   bin/ci --tests         unit and integration tests, no lint or typecheck; what
+#                          CI runs on a merge to main
 #   bin/ci --install       install/restore dependencies first (slow; after a pull)
 #   bin/ci --only api      just one component
 #   bin/ci --fail-fast     stop at the first failure
@@ -19,15 +21,16 @@
 set -uo pipefail
 
 MANIFEST="${CI_MANIFEST:-.github/components.yml}"
-QUICK=false; INSTALL=false; FAIL_FAST=false; ONLY=""
+QUICK=false; TESTS_ONLY=false; INSTALL=false; FAIL_FAST=false; ONLY=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --quick)      QUICK=true ;;
+    --tests)      TESTS_ONLY=true ;;
     --install)    INSTALL=true ;;
     --fail-fast|-f) FAIL_FAST=true ;;
     --only)       ONLY="${2:-}"; shift ;;
-    -h|--help)    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -127,7 +130,7 @@ for (( i=0; i<COUNT; i++ )); do
     step "${NAME}: restore (locked)" "(cd \"${DIR}\" && ${RESTORE})"
   fi
 
-  if [[ "${QUICK}" == false ]]; then
+  if [[ "${QUICK}" == false && "${TESTS_ONLY}" == false ]]; then
     cmd="${C_LINT}"
     if [[ -z "$cmd" ]]; then
       case "${RUNTIME}" in
@@ -142,9 +145,11 @@ for (( i=0; i<COUNT; i++ )); do
     cmd="${C_TYPE}"
     if [[ -z "$cmd" ]]; then
       case "${RUNTIME}" in
-        node)   cmd="[ -f tsconfig.json ] && npx --no-install tsc --noEmit || echo 'no tsconfig; skipped'" ;;
+        # if/else, not `a && b || echo`: with that shape a failing tsc or
+        # mypy falls through to the echo and the step passes.
+        node)   cmd="if [ -f tsconfig.json ]; then npx --no-install tsc --noEmit; else echo 'no tsconfig; skipped'; fi" ;;
         dotnet) cmd="dotnet build \"${PROJECT}\" --no-restore -c Release -warnaserror" ;;
-        python) cmd="python -m mypy --version > /dev/null 2>&1 && python -m mypy . || echo 'mypy not installed; skipped'" ;;
+        python) cmd="if python -m mypy --version > /dev/null 2>&1; then python -m mypy .; else echo 'mypy not installed; skipped'; fi" ;;
       esac
     fi
     step "${NAME}: typecheck" "(cd \"${DIR}\" && ${cmd})"

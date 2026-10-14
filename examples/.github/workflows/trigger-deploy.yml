@@ -1,0 +1,28 @@
+# .github/workflows/trigger-deploy.yml — calls reusable-deploy-to-production
+#
+# Ships an existing release to production. Running it is the approval.
+name: Deploy
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release to ship, e.g. v1.4.0'
+        type: string
+        required: true
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+# The repo default token may be read-only. A called workflow can't raise
+# permissions, so grant what the reusable workflow asks for here.
+permissions:
+  contents: read           # release assets
+  actions: read
+  id-token: write          # Azure login
+  deployments: write       # one record per component, against the released commit
+  packages: write          # packages publish their stable version now
+jobs:
+  ci:
+    uses: Haam909/ci-workflows/.github/workflows/reusable-deploy-to-production.yml@v1
+    with:
+      tag: ${{ inputs.tag }}
+    secrets: inherit

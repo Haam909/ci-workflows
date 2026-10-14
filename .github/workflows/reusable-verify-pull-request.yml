@@ -11,10 +11,17 @@ on:
     inputs:
       require-local-signoff:
         description: >-
-          Require a green local/ci commit status, posted by the developer's
-          pre-push hook.
+          Require green local/ci commit statuses on the PR's head commit,
+          posted by bin/signoff from developer machines.
         type: boolean
         default: true
+      signoffs:
+        description: >-
+          How many different people must have signed the commit off. With 2
+          or more, one of them must not be the PR's author: the reviewer
+          pulled the branch, ran bin/ci and ran bin/signoff too.
+        type: number
+        default: 2
       signoff-context:
         type: string
         default: 'local/ci'
@@ -49,24 +56,44 @@ jobs:
           fi
           echo "Current with ${BASE}."
 
-      # The developer machine ran the checks; this confirms it happened for
-      # this exact commit. A new commit has no signoff.
+      # Developer machines ran the checks; this confirms it happened for this
+      # exact commit, and by enough different people. The author's signoff
+      # comes from the pre-push hook; a reviewer's from pulling the branch and
+      # running bin/ci and bin/signoff. A new commit has no signoffs.
       - name: Local checks must be signed off for this commit
         if: inputs.require-local-signoff
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CTX: ${{ inputs.signoff-context }}
+          NEED: ${{ inputs.signoffs }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          STATE="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/statuses" \
-                     --jq "[.[] | select(.context == \"${CTX}\")] | first | .state // empty")"
-          if [[ "${STATE}" != "success" ]]; then
-            echo "::error::No green '${CTX}' status on ${SHA:0:7} (found: ${STATE:-none})."
-            echo "::error::Run ./bin/ci locally, then ./bin/signoff ${SHA}"
+          # Each person's latest status in this context, keeping the green ones.
+          # Statuses come newest first.
+          SIGNED="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/statuses?per_page=100" \
+                      --jq "[.[] | select(.context == \"${CTX}\")]
+                            | group_by(.creator.login) | map(first)
+                            | map(select(.state == \"success\") | .creator.login) | .[]")"
+          COUNT="$(grep -c . <<< "${SIGNED}" || true)"
+          OTHERS="$(grep -vxF "${AUTHOR}" <<< "${SIGNED}" || true)"
+          echo "Green '${CTX}' on ${SHA:0:7} from: $(tr '\n' ' ' <<< "${SIGNED:-nobody}")"
+          if (( COUNT < NEED )); then
+            echo "::error::${COUNT} of ${NEED} required '${CTX}' signoffs on ${SHA:0:7}."
+            if (( NEED >= 2 )) && grep -qxF "${AUTHOR}" <<< "${SIGNED}"; then
+              echo "::error::A reviewer must pull this branch, run ./bin/ci, then ./bin/signoff ${SHA}"
+            else
+              echo "::error::Run ./bin/ci locally, then ./bin/signoff ${SHA}"
+            fi
             exit 1
           fi
-          echo "Signed off locally."
+          if (( NEED >= 2 )) && [[ -z "${OTHERS}" ]]; then
+            echo "::error::Every '${CTX}' signoff on ${SHA:0:7} is from the author (${AUTHOR}). One must come from someone else."
+            echo "::error::A reviewer must pull this branch, run ./bin/ci, then ./bin/signoff ${SHA}"
+            exit 1
+          fi
+          echo "Signed off locally by ${COUNT} people."
 
   branch-name:
     if: github.event_name == 'pull_request'

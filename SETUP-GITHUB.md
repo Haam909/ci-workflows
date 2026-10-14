@@ -55,9 +55,11 @@ your-app repo                      ci-workflows repo
 .github/workflows/
   trigger-pull-request.yml ─uses─► reusable-verify-pull-request.yml
   trigger-merge-to-main.yml ─uses─► reusable-deploy-to-test.yml
-  trigger-release.yml      ─uses─► reusable-release-to-production.yml
+  trigger-release.yml      ─uses─► reusable-release.yml
+  trigger-deploy.yml       ─uses─► reusable-deploy-to-production.yml
                                      │
                                      └─ uses ─► actions/install-toolchain
+                                                actions/run-tests
                                                 actions/build-artifact
                                                 actions/deliver-artifact
                                                 actions/derive-version
@@ -139,19 +141,20 @@ project to your repo root. You should end up with:
 .github/workflows/trigger-pull-request.yml
 .github/workflows/trigger-merge-to-main.yml
 .github/workflows/trigger-release.yml
+.github/workflows/trigger-deploy.yml
 ```
 
 If you renamed the account in step 2, the copies already have your name;
-otherwise edit all four to replace `Haam909/ci-workflows` with
+otherwise edit all five to replace `Haam909/ci-workflows` with
 `YOURNAME/ci-workflows`.
 
 Leave the `permissions:` block in each trigger file alone. New repos give
 workflows a read-only token by default, and a shared workflow can't ask for
 more than its caller grants, so without it the run fails before any job starts.
 
-**To start with, delete `trigger-merge-to-main.yml` and
-`trigger-release.yml`.** Get pull request checks working first. Add them back
-in step 7 (copy them from `examples/` again).
+**To start with, delete `trigger-merge-to-main.yml`, `trigger-release.yml`
+and `trigger-deploy.yml`.** Get pull request checks working first. Add them
+back in step 7 (copy them from `examples/` again).
 
 ## Step 5 — Describe your repo in `components.yml`
 
@@ -175,7 +178,8 @@ components:
 - `name` — anything; it shows up as the job name.
 - `runtime` — `dotnet`, `node` (TypeScript *or* JavaScript), or `python`.
 - `target` — where it eventually ships. Ignore this for now; it doesn't
-  affect pull request checks.
+  affect pull request checks. With no Azure to deploy to, use `none`: the
+  release still builds, signs and attaches the artifact.
 - `project` — for dotnet, the path to the `.csproj`.
 - `test-project` — for dotnet, the unit test `.csproj`. Without it the
   component's unit tests are skipped.
@@ -194,9 +198,10 @@ Pull request checks don't depend on it.
 ## Step 6 — Things your repo needs before checks will pass
 
 The checks — lint, typecheck, unit and integration tests — run **on your
-machine** through `bin/ci`, before each push. CI doesn't re-run them; the PR
-gate checks two things: the branch is current with `main`, and the commit has a
-green `local/ci` signoff from your machine.
+machine** through `bin/ci`, before each push, and again on the reviewer's.
+CI doesn't re-run them; the PR gate checks two things: the branch is current
+with `main`, and the commit has green `local/ci` signoffs from two people,
+one of them not the author.
 
 **Install the local gate first** — the PR gate fails without it. Follow
 "Installing it in a repo" in LOCAL-GATE.md (copy three scripts, mark them
@@ -248,9 +253,19 @@ and posts the signoff once the push lands. Nothing runs on GitHub yet — the
 checks start when the pull request exists.
 
 Open the PR on GitHub. You should see two checks, `ci / gate` and
-`ci / branch-name`, plus the `local/ci` status from your machine. If
-something's red, jump to Troubleshooting at the bottom — that's expected on a
-first run.
+`ci / branch-name`, plus the `local/ci` status from your machine. `ci / gate`
+is red at this point with "1 of 2 required 'local/ci' signoffs": a reviewer
+has to pull the branch, run `bin/ci` and `bin/signoff`, then re-run the
+failed job (see "Reviewing" in LOCAL-GATE.md). Working alone, pass
+`signoffs: 1` to the reusable workflow in `trigger-pull-request.yml`:
+
+```yaml
+    with:
+      signoffs: 1
+```
+
+If anything else is red, jump to Troubleshooting at the bottom — that's
+expected on a first run.
 
 The branch had to start with `fix/` — see step 8 for why.
 
@@ -258,28 +273,17 @@ The branch had to start with `fix/` — see step 8 for why.
 
 Everything below is for releases. Skip it until checks are green.
 
-## Step 7 — Create the environments
+## Step 7 — Restore the triggers and set the starting version
 
-Repo **Settings → Environments → New environment**. Create three, named
-exactly:
+No environments to create. The merge run deploys under one called `test` and
+Deploy runs under one called `production`; GitHub makes both the first time a
+run names them, with no rules. Running the Release and Deploy workflows by
+hand is the approval. If you later want a second person to approve a deploy
+that someone else started, add **Required reviewers** to `production`
+(Settings → Environments). On a personal account that only works on public
+repos under GitHub Free.
 
-- `test`
-- `release`
-- `production`
-
-On `release` only, tick **Required reviewers** and add yourself. This is the
-gate: the release pauses there and waits for a human to click Approve. That's
-the "ship it" decision, and it's the only one left in the whole pipeline.
-
-Leave `test` and `production` with no rules. `production` doesn't need a gate
-because `release` already gated it.
-
-**Important on a personal account:** required reviewers only work on **public**
-repos under GitHub Free. On a private personal repo the environment still
-exists but won't pause for approval. If you're just testing, that's fine —
-it'll run straight through.
-
-Now restore the two trigger files you deleted in step 4 — but set the starting
+Restore the three trigger files you deleted in step 4 — but set the starting
 version **first**, in the same go. The version comes from tags; with no `v*`
 tag at all, every merge builds `0.1.0-alpha.0` and the first release is
 `0.1.0` regardless of what you merged. And the commit that adds
@@ -288,10 +292,9 @@ restored triggers with `[skip ci]`, and tag that commit as the starting point �
 the only tag you'll ever create yourself:
 
 ```bash
-cp <ci-workflows>/examples/.github/workflows/trigger-merge-to-main.yml \
-   <ci-workflows>/examples/.github/workflows/trigger-release.yml .github/workflows/
+cp <ci-workflows>/examples/.github/workflows/trigger-merge-to-main.yml    <ci-workflows>/examples/.github/workflows/trigger-release.yml    <ci-workflows>/examples/.github/workflows/trigger-deploy.yml .github/workflows/
 git add .github/workflows
-git commit -m "ci: restore merge and release triggers [skip ci]"
+git commit -m "ci: restore merge, release and deploy triggers [skip ci]"
 git push
 git tag -a v0.1.0 -m "starting point"
 git push origin v0.1.0
@@ -380,19 +383,19 @@ an organization.
 You tagged the starting point in step 7. Then:
 
 1. Merge a `fix/…` or `feature/…` branch into main. `trigger-merge-to-main`
-   runs and records a deployment to the `test` environment.
+   runs the tests, builds, and records a deployment to the `test` environment.
 2. Go to **Actions → Release → Run workflow**. Leave the major checkbox
-   unticked. Leave **sha** blank to ship what's in test, or paste the commit
+   unticked. Leave **sha** blank to release what's in test, or paste the commit
    you've signed off on (any commit on `main` after the last release). Click
    the green button.
-3. It works out which commit to ship and what version it should be, then
-   stops at the `release` gate. Open the run and click **Review deployments
-   → Approve**.
-4. It builds and signs, creates the tag and a **draft** GitHub Release,
-   promotes, and only then publishes the release.
+3. It works out which commit and what version, builds and signs, creates the
+   tag and publishes the GitHub Release with the assets. Nothing is deployed.
+4. To ship it: **Actions → Deploy → Run workflow**, type the tag (`v0.2.0`),
+   click the green button. The assets come from the release, checked against
+   its checksums, and go to production.
 
-If promotion fails, the release stays a draft. Fix the cause and click
-**Re-run failed jobs** on the run — see "What a release does" in README.md.
+If a component fails to deploy, fix the cause and click **Re-run failed
+jobs** on the run, or run Deploy again with the same tag.
 
 You never supply a version number, and the commit is optional. If you merged one `feature/` and
 two `fix/` branches, it resolves to `0.2.0` — the biggest bump wins.

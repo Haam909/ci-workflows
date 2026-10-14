@@ -1,4 +1,7 @@
-# .github/workflows/trigger-release.yml — calls reusable-release-to-production
+# .github/workflows/trigger-release.yml — calls reusable-release
+#
+# Marks a commit as a release: version, build, SBOM, signatures, tag, GitHub
+# Release. Deploys nothing; that is trigger-deploy.yml.
 name: Release
 on:
   workflow_dispatch:
@@ -17,16 +20,14 @@ concurrency:
 # The repo default token may be read-only. A called workflow can't raise
 # permissions, so grant what the reusable workflow asks for here.
 permissions:
-  contents: write
+  contents: write          # the tag and the release
   actions: read
-  pull-requests: read     # derive-version reads each merged PR's branch
-  id-token: write
+  pull-requests: read      # derive-version reads each merged PR's branch
+  id-token: write          # keyless signing, attestation, Azure login for containers
   attestations: write
-  deployments: write
-  packages: write
 jobs:
   ci:
-    uses: Haam909/ci-workflows/.github/workflows/reusable-release-to-production.yml@v1
+    uses: Haam909/ci-workflows/.github/workflows/reusable-release.yml@v1
     with:
       major: ${{ inputs.major }}
       sha: ${{ inputs.sha }}

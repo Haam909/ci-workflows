@@ -65,6 +65,30 @@ if git rev-parse --verify --quiet "${REMOTE}/${MAIN}" > /dev/null; then
   echo "${GREEN}✓ up to date with ${REMOTE}/${MAIN}${OFF}"
 fi
 
+# bin/ci tests the working tree; the signoff names a commit. They must be the
+# same code: HEAD must be the commit being pushed, with nothing uncommitted.
+# Otherwise a fix that was never committed makes a broken commit green.
+if [[ "$(git rev-parse HEAD)" != "${PUSHED_SHA}" ]]; then
+  echo
+  echo "${RED}✗ HEAD is not ${PUSHED_SHA:0:7}, the commit being pushed.${OFF}"
+  echo "  The checks would run on a different tree. Check out ${PUSHED_REF#refs/heads/} and push again."
+  echo
+  exit 1
+fi
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  echo
+  echo "${RED}✗ uncommitted changes — the checks would run on code that isn't in the commit.${OFF}"
+  git status --short --untracked-files=no | sed 's/^/    /'
+  echo "  Commit or stash them, then push again."
+  echo
+  exit 1
+fi
+UNTRACKED="$(git status --porcelain --untracked-files=all | sed -n 's/^?? //p')"
+if [[ -n "${UNTRACKED}" ]]; then
+  echo "${YELLOW}! untracked files are not in the commit:${OFF}"
+  sed 's/^/    /' <<< "${UNTRACKED}"
+fi
+
 echo "${GREY}pre-push: running checks (lint, typecheck, unit, integration)${OFF}"
 echo
 

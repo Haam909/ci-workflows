@@ -1,18 +1,20 @@
-# Haam909/ci-workflows/.github/workflows/reusable-release-to-production.yml
+# Haam909/ci-workflows/.github/workflows/reusable-release.yml
 #
-# Reusable, manual. The human decisions are which commit to ship (optional
-# `sha` input; blank means the commit currently live in test), approving the
-# `release` environment and, rarely, ticking the major box. There is no version
-# input: the version is always derived.
+# Reusable, manual. Marks a commit as a release: derives the version, builds
+# every component from that commit, generates SBOMs, signs, attests, tags, and
+# publishes a GitHub Release with the assets. It deploys nothing. Shipping a
+# release to production is a second manual step, reusable-deploy-to-production.yml.
+#
+# The human decisions are which commit (optional `sha` input; blank means the
+# commit currently live in test) and, rarely, ticking the major box. Running
+# this workflow is the approval; it waits at no environment. There is no
+# version input: the version is always derived.
 #
 # Ordering note: the GitHub Release is created as a draft with every asset
-# attached, and the tag is pushed only after those uploads succeed. A failed
-# upload therefore leaves no orphan tag behind. The draft is published only
-# after every component has been promoted, so a public release always means
-# it is live; a failed promote leaves the tag and a draft, and re-running the
-# failed jobs finishes the release.
+# attached, the tag is pushed only after those uploads succeed, and the draft
+# is published last. A failed upload leaves no orphan tag behind.
 
-name: release-to-production
+name: release
 
 on:
   workflow_call:
@@ -26,8 +28,7 @@ on:
       sha:
         description: >-
           Commit to release. Any ancestor of the default branch newer than the
-          last release.
-          Blank releases the commit currently live in test.
+          last release. Blank releases the commit currently live in test.
         type: string
         default: ''
       node-version:
@@ -45,11 +46,13 @@ on:
           signing records the repo's name in Sigstore's public log.
         type: boolean
         default: false
+    outputs:
+      version:
+        value: ${{ jobs.resolve.outputs.version }}
+      tag:
+        value: v${{ jobs.resolve.outputs.version }}
 
-# No permissions block: the token is whatever the trigger grants. Declaring a
-# permission here that an existing trigger doesn't grant would stop that
-# repo's runs at startup, so new ones (pull-requests: read) are added to the
-# triggers in examples/ only.
+# No permissions block: the token is whatever the trigger grants (examples/).
 
 jobs:
   resolve:
@@ -75,12 +78,13 @@ jobs:
           SHA=""; CREATED=""
 
           if [[ -n "${INPUT_SHA}" ]]; then
-            # Chosen by a person. Sign-off happens outside CI, so the only
-            # requirement is that it is on the default branch.
             SHA="$(git rev-parse --verify --quiet "${INPUT_SHA}^{commit}")" \
               || { echo "::error::${INPUT_SHA} is not a commit in this repository."; exit 1; }
             SOURCE="chosen"
           else
+            # The newest test deployment whose latest status is success. Each
+            # component records its own, so this is the newest commit where at
+            # least one component deployed; check the merge run if in doubt.
             for id in $(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=test&per_page=30" --jq '.[].id'); do
               state="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}/statuses?per_page=1" --jq '.[0].state // empty')"
               if [[ "${state}" == "success" ]]; then
@@ -114,15 +118,16 @@ jobs:
 
           if [[ -n "${CREATED}" ]]; then
             AGE=$(( ( $(date +%s) - $(date -d "${CREATED}" +%s) ) / 86400 ))
-            (( AGE > 14 )) && echo "::warning::The test deployment is ${AGE} days old. Confirm this is what you mean to ship."
+            (( AGE > 14 )) && echo "::warning::The test deployment is ${AGE} days old. Confirm this is what you mean to release."
           fi
 
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "source=${SOURCE}" >> "$GITHUB_OUTPUT"
           echo "Releasing ${SHA} (${SOURCE})"
 
-      # The checkout above is the dispatch ref (the default branch's head). A chosen older
-      # commit must be built from its own manifest, so read it from that commit.
+      # The checkout above is the dispatch ref (the default branch's head). A
+      # chosen older commit must be built from its own manifest, so read it
+      # from that commit.
       - id: read
         env:
           SHA: ${{ steps.target.outputs.sha }}
@@ -158,8 +163,6 @@ jobs:
     name: build ${{ matrix.component.name }}
     needs: resolve
     runs-on: ubuntu-latest
-    environment:
-      name: release        # required reviewers here — this is the ship gate
     strategy:
       fail-fast: true
       matrix:
@@ -176,6 +179,8 @@ jobs:
           dotnet-version: ${{ inputs.dotnet-version }}
           python-version: ${{ inputs.python-version }}
 
+      # A container image has to live in a registry, so it is pushed now,
+      # at release, and deploy-to-production points the app at it later.
       - uses: azure/login@v2
         if: matrix.component.target == 'container'
         with:
@@ -255,9 +260,20 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           [[ "${ATTEST}" == failure ]] && echo "::warning::${{ matrix.component.name }}: no attestation (private repo without Enterprise Cloud)" || true
 
-      - name: Record image reference
-        if: matrix.component.target == 'container'
-        run: echo "${{ steps.build.outputs.artifact }}" > "_artifacts/${{ matrix.component.name }}.image"
+      # deploy-to-production finds each component's artifact among the
+      # release assets by these two small files, so it never has to guess
+      # from file names (a nupkg is named by PackageId, not component).
+      - name: Record what was built
+        env:
+          ARTIFACT: ${{ steps.build.outputs.artifact }}
+          NAME: ${{ matrix.component.name }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.component.target }}" == "container" ]]; then
+            echo "${ARTIFACT}" > "_artifacts/${NAME}.image"
+          else
+            basename "${ARTIFACT}" > "_artifacts/${NAME}.artifact"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -267,7 +283,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: tag and draft release
+    name: tag and publish release
     needs: [resolve, build]
     runs-on: ubuntu-latest
     env:
@@ -302,114 +318,11 @@ jobs:
           git tag -a "v${VERSION}" "${TARGET_SHA}" -m "Release v${VERSION}"
           git push origin "v${VERSION}"
 
-  promote:
-    name: promote ${{ matrix.component.name }}
-    needs: [resolve, publish]
-    runs-on: ubuntu-latest
-    # deployment: false stops GitHub recording this job against the commit the
-    # run was dispatched from (the default branch's head), which isn't the commit being
-    # shipped when a sha is chosen. The steps below record the real one.
-    environment:
-      name: production
-      deployment: false
-    strategy:
-      fail-fast: false
-      matrix:
-        component: ${{ fromJSON(needs.resolve.outputs.components) }}
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-    steps:
-      - name: Record deployment of the released commit
-        id: record
-        env:
-          SHA: ${{ needs.resolve.outputs.sha }}
-          VERSION: ${{ needs.resolve.outputs.version }}
-          NAME: ${{ matrix.component.name }}
-        run: |
-          set -euo pipefail
-          ID="$(jq -n --arg ref "${SHA}" --arg c "${NAME}" --arg v "${VERSION}" \
-                  '{ref: $ref, environment: "production", production_environment: true,
-                    auto_merge: false, required_contexts: [],
-                    description: "\($c) v\($v)", payload: {component: $c, version: $v}}' \
-                | gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" --input - --jq .id)"
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${ID}/statuses" \
-            -f state=in_progress -f log_url="${RUN_URL}" --silent
-          echo "id=${ID}" >> "$GITHUB_OUTPUT"
-          echo "Deployment ${ID}: ${NAME} v${VERSION} at ${SHA}"
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-${{ matrix.component.name }}
-          path: _artifacts
-
-      - uses: actions/setup-node@v4
-        if: matrix.component.target == 'package' && matrix.component.runtime == 'node'
-        with:
-          node-version: ${{ inputs.node-version }}
-
-      - uses: actions/setup-dotnet@v4
-        if: matrix.component.target == 'package' && matrix.component.runtime == 'dotnet'
-        with:
-          dotnet-version: ${{ inputs.dotnet-version }}
-
-      - uses: actions/setup-python@v5
-        if: matrix.component.target == 'package' && matrix.component.runtime == 'python'
-        with:
-          python-version: ${{ inputs.python-version }}
-
-      # Services always need Azure. Packages need it only when their feed is
-      # Azure Artifacts, to mint the feed token; that needs no subscription,
-      # so a repo whose only Azure use is Azure Artifacts sets none.
-      - uses: azure/login@v2
-        if: matrix.component.target != 'package' || contains(matrix.component.feed || '', 'pkgs.dev.azure.com') || contains(matrix.component.feed || '', 'visualstudio.com')
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          allow-no-subscriptions: ${{ matrix.component.target == 'package' }}
-
-      - name: Resolve artifact path
-        id: artifact
-        run: |
-          set -euo pipefail
-          case "${{ matrix.component.target }}" in
-            container) echo "path=$(cat '_artifacts/${{ matrix.component.name }}.image')" >> "$GITHUB_OUTPUT" ;;
-            package)
-              case "${{ matrix.component.runtime }}" in
-                dotnet) echo "path=$(ls _artifacts/*.nupkg | head -1)" >> "$GITHUB_OUTPUT" ;;
-                node)   echo "path=$(ls _artifacts/*.tgz    | head -1)" >> "$GITHUB_OUTPUT" ;;
-                python) echo "path=$(ls _artifacts/*.whl    | head -1)" >> "$GITHUB_OUTPUT" ;;
-              esac ;;
-            *) echo "path=_artifacts/${{ matrix.component.name }}-${{ needs.resolve.outputs.version }}.zip" >> "$GITHUB_OUTPUT" ;;
-          esac
-
-      - uses: Haam909/ci-workflows/actions/deliver-artifact@v1
-        with:
-          component: ${{ toJSON(matrix.component) }}
-          artifact: ${{ steps.artifact.outputs.path }}
-          version: ${{ needs.resolve.outputs.version }}
-          stage: production
-          resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          feed-token: ${{ matrix.component['feed-token-secret'] && secrets[matrix.component['feed-token-secret']] || '' }}
-
-      - name: Record deployment result
-        if: always() && steps.record.outputs.id != ''
-        env:
-          ID: ${{ steps.record.outputs.id }}
-          STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
-        run: |
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${ID}/statuses" \
-            -f state="${STATE}" -f log_url="${RUN_URL}" --silent
-          echo "Deployment ${ID}: ${STATE}"
-
-  go-live:
-    name: publish release
-    needs: [resolve, promote]
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
       - name: Publish release
-        run: gh release edit "v${{ needs.resolve.outputs.version }}" --draft=false -R "${GITHUB_REPOSITORY}"
+        run: |
+          gh release edit "v${VERSION}" --draft=false -R "${GITHUB_REPOSITORY}"
+          {
+            echo "Released **v${VERSION}** from \`${TARGET_SHA:0:7}\`."
+            echo ""
+            echo "To ship it: Actions → Deploy → Run workflow, tag \`v${VERSION}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

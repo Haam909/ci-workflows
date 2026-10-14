@@ -3,10 +3,11 @@
 # Two independent axes:
 #
 #   runtime: dotnet | node | python     how it is built (node = TypeScript or JavaScript)
-#   target:  app-service | function | container | package    how it ships
+#   target:  app-service | function | container | package | none    how it ships
 #
 # Any combination works. A Python Function and a C# Function deploy
-# identically; only the build differs.
+# identically; only the build differs. `none` builds, signs and attaches the
+# artifact to the GitHub Release and deploys nowhere: no Azure needed.
 #
 # Optional per component:
 #   path                    working directory (node/python); defaults to repo root

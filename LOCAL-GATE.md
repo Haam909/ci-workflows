@@ -1,9 +1,15 @@
 # The local gate
 
 Unit tests run on the developer's machine, before the push. A commit status
-records that they passed, pinned to the exact commit. CI checks that status
-instead of re-running the tests, and separately confirms the branch is still
-current with main.
+records that they passed, pinned to the exact commit. The reviewer then pulls
+the branch, runs the same checks on their machine, and posts a second status.
+CI checks for both instead of re-running the tests, and separately confirms
+the branch is still current with main.
+
+Two machines, not one, is the point. A change that only works on the
+author's machine fails on the reviewer's, so missing setup steps, undocumented
+tools and stale lock files surface on every pull request instead of at
+onboarding time.
 
 The idea is from Basecamp, by way of Rails 8.1, which now generates a `bin/ci`
 and `config/ci.rb` by default. Their argument is that a suite only runnable in
@@ -13,22 +19,33 @@ unnecessary for most suites.
 ## The flow
 
 ```
-  you                                          GitHub
-  ───                                          ──────
+  author                                       GitHub
+  ──────                                       ──────
   git push
    └─ pre-push hook
        ├─ is my root current with main?  ──── fetch origin/main
+       ├─ is HEAD the pushed commit, with nothing uncommitted?
        ├─ bin/ci  (lint, typecheck, unit, integration)
        └─ push proceeds ──────────────────────► objects land
            └─ bin/signoff --wait ─────────────► status local/ci = success
-                                                  pinned to that SHA
+                                                  pinned to that SHA, by author
   open (or update) a PR ─────────────────────► pull_request run
                                                gate job
                                                 ├─ is main still an ancestor?
-                                                └─ is local/ci green on this SHA?
+                                                └─ two green local/ci on this SHA,
+                                                   one not from the author?  ✗ yet
                                                branch-name job
                                                 └─ does the branch have a known prefix?
+  reviewer
+  ────────
+  git fetch && git checkout <branch>
+  bin/ci
+  bin/signoff <sha> ──────────────────────────► status local/ci = success, by reviewer
+  Re-run failed jobs ─────────────────────────► gate job passes
 ```
+
+The gate requires two signoffs by default; the `signoffs` input on
+`reusable-verify-pull-request.yml` changes that (`1` restores author-only).
 
 The PR checks run on `pull_request` only, not on every branch push — a push
 trigger as well would report each check twice per commit, with a skipped
@@ -49,8 +66,8 @@ overrides it. The PR gate compares with the PR's base branch.
 |---|---|---|---|
 | Up to date with main | advisory | enforced | — |
 | Lint, typecheck | ✓ | — | — |
-| Unit tests | ✓ | — | — |
-| Integration tests | ✓ | — | — |
+| Unit tests | ✓ | — | ✓ |
+| Integration tests | ✓ | — | ✓ |
 | Signoff present | — | enforced | — |
 | Build + deploy to test | — | — | ✓ |
 
@@ -164,9 +181,25 @@ bin/signoff              # HEAD
 bin/signoff <sha>        # a specific commit
 ```
 
-The gate doesn't re-check by itself when the status arrives. If it already
-failed with "No green 'local/ci' status", re-run it after signing off:
-**Re-run failed jobs** on the run, or `gh run rerun <run-id> --failed`.
+## Reviewing
+
+The reviewer does the same thing the author did, on their own machine:
+
+```bash
+git fetch origin && git checkout <branch>
+bin/ci                   # the full gate; bin/ci --install first if dependencies changed
+bin/signoff              # HEAD is the PR's head commit
+```
+
+The gate counts distinct people with a green `local/ci` on the head commit
+and needs two, one of whom isn't the PR's author. A commit status carries
+who posted it, so the reviewer's signoff is a second person's, not a second
+status. Both vanish when the author pushes again, so both run again.
+
+The gate doesn't re-check by itself when a status arrives. It will already
+have failed with "1 of 2 required 'local/ci' signoffs" on the author's push;
+re-run it after signing off: **Re-run failed jobs** on the run, or
+`gh run rerun <run-id> --failed`.
 
 ## Branch protection
 
@@ -184,8 +217,14 @@ merge button, and the gate job explains why with a commit count.
 **It's weak enforcement, deliberately.** Anyone can run `bin/signoff` without
 running `bin/ci`. Brandur's take on Basecamp's version is that a pattern of
 bad signoffs is a workplace problem you deal with like any other, and that
-even mandatory checks usually have a bypass someone can abuse. If your threat
-model needs more than that, don't use this.
+even mandatory checks usually have a bypass someone can abuse. Needing a
+second person makes it a two-person problem. If your threat model needs more
+than that, don't use this.
+
+**The hook checks the tree it tests is the commit it signs.** It refuses when
+`HEAD` isn't the commit being pushed or when tracked files have uncommitted
+changes, and lists untracked files as a warning. Without that, a fix that was
+never committed would make a broken commit green.
 
 **Green locally isn't green everywhere.** A developer on a different SDK
 patch, a different Python version, or with stale dependencies can sign off on
