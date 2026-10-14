@@ -1,16 +1,18 @@
 # ci-workflows
 
 Shared CI/CD for the org's ~30 repositories. Each repo contributes a component
-manifest and three thin wrappers.
+manifest and four thin wrappers.
 
 ```
 .github/workflows/
   reusable-verify-pull-request.yml      reusable — PR gate
-  reusable-deploy-to-test.yml           reusable — merge to main
-  reusable-release-to-production.yml    reusable — manual release
+  reusable-deploy-to-test.yml           reusable — merge to main: test, build, deploy to test
+  reusable-release.yml                  reusable — manual: version, build, SBOM, sign, tag, release
+  reusable-deploy-to-production.yml     reusable — manual: ship a release
   self-test.yml                         this repo's own test, on PRs and main
 actions/
   install-toolchain/           toolchain + locked dependency install
+  run-tests/                   unit + integration tests in CI, with local/bin/ci
   build-artifact/              build + version stamp + package
   generate-sbom/               CycloneDX SBOM for a release build
   deliver-artifact/            deploy or publish to feed
@@ -30,7 +32,17 @@ examples/.github/              copy into a consuming repo as-is
     trigger-pull-request.yml
     trigger-merge-to-main.yml
     trigger-release.yml
+    trigger-deploy.yml
 ```
+
+The flow, end to end:
+
+| Stage | Trigger | Human? |
+|---|---|---|
+| PR gate | pull request | two signoffs from developer machines |
+| Test | merge to main | no: tests run, every component deploys to test |
+| Release (version, SBOM, sign, tag) | Actions → Release, pick a commit | yes, running it |
+| Production | Actions → Deploy, pick a release | yes, running it |
 
 Want tests to run on your machine instead of waiting on a runner? See
 **LOCAL-GATE.md**.
@@ -48,11 +60,16 @@ in each consuming repo and only decide when to call them.
 They're independent — a Python Function and a C# Function deploy identically,
 and a Go binary would only need a new runtime, not a new delivery path.
 
-| | `app-service` | `function` | `container` | `package` |
-|---|---|---|---|---|
-| `dotnet` | `publish` → zip | `publish` → zip | image | `pack` → `.nupkg` |
-| `node` | build + prod `node_modules` → zip | same | image | `npm pack` → `.tgz` |
-| `python` | source + lock → zip (Oryx installs) | deps into `.python_packages` → zip | image | `.whl` + sdist |
+| | `app-service` | `function` | `container` | `package` | `none` |
+|---|---|---|---|---|---|
+| `dotnet` | `publish` → zip | `publish` → zip | image | `pack` → `.nupkg` | `publish` → zip |
+| `node` | build + prod `node_modules` → zip | same | image | `npm pack` → `.tgz` | same as app-service |
+| `python` | source + lock → zip (Oryx installs) | deps into `.python_packages` → zip | image | `.whl` + sdist | same as app-service |
+
+`none` is for a repo with nowhere to deploy: the component is built, versioned,
+signed and attached to the GitHub Release, and the merge and deploy steps
+deliver nothing. It needs no Azure configuration. Use it for the versioning
+and release flow on its own.
 
 Adding a runtime touches `install-toolchain`, `build-artifact` and `bin/ci`.
 Adding a target touches `deliver-artifact`. Nothing else.
@@ -122,8 +139,8 @@ messages, so squash and rebase merges behave the same as merge commits.
 
 `reusable-deploy-to-test.yml` builds prereleases — `1.4.0-alpha.12`, where 12 is the commit count
 since the tag. For packages that's the point: consumers try the change before
-a stable version exists. For services it's just a build label; production gets
-the clean `1.4.0` from `reusable-release-to-production.yml`.
+a stable version exists. For services it's just a build label; the release
+gets the clean `1.4.0` from `reusable-release.yml`.
 
 Python gets `1.4.0a12` instead, since PEP 440 rejects the semver spelling.
 It's written into the static `version` field of `pyproject.toml` (PEP 621 or
@@ -139,6 +156,8 @@ to begin somewhere else — that's the only manual tag in the system.
 
 ## What a release does
 
+Running **Release** marks a commit. It deploys nothing.
+
 1. `resolve` picks the commit. With the `sha` input set, it's that commit;
    left blank, it's the last **successful** `test` deployment (warned if over
    14 days old). Either way the commit must be an ancestor of `main` and must
@@ -148,31 +167,33 @@ to begin somewhere else — that's the only manual tag in the system.
    not from `main`, so an older commit is built with its own manifest.
 2. Derives the version from the branches merged up to that commit; anything
    merged after it doesn't count.
-3. Waits at the `release` environment gate. This is the ship decision, and the
-   only judgment left in the pipeline.
-4. Rebuilds every component from that commit stamped with the version,
+3. Builds every component from that commit stamped with the version,
    generates CycloneDX SBOMs, signs with keyless cosign, attests provenance.
-   Container images are signed by digest in the registry.
-5. Creates the GitHub Release as a **draft with assets**, then pushes the tag.
-   A failed upload leaves no orphan tag.
-6. Promotes. App Services and Functions deploy to the staging slot, smoke
-   test, swap, verify, and swap back automatically if production fails its
-   health check. Containers get a new revision. Packages publish the stable
-   version. Each component's `production` deployment is recorded against the
-   **released** commit (`<component> v<version>`, then `success` or
-   `failure`). GitHub's automatic record would use the commit the run was
-   dispatched from — `main`'s head — so it's turned off (`deployment: false`;
-   environment protection rules still apply).
-7. Publishes the draft release, only once every component promoted.
+   Container images are pushed to the registry now and signed by digest.
+4. Creates the GitHub Release as a draft with every asset, pushes the tag,
+   then publishes the release. A failed upload leaves no orphan tag.
 
-**When promote fails** — a rejected environment rule, a feed refusing the
-publish, a failed health check — the tag exists, the release stays a
-**draft**, and nothing has been announced. Fix the cause, then **Re-run failed
-jobs** (`gh run rerun <run-id> --failed`): that re-runs promote and the
-publish step that depended on it. The `release` approval isn't asked again,
-because the job behind the gate already passed, and the tag isn't pushed twice.
-The failed attempt keeps its `failure` deployment record; the re-run adds a
-new one.
+Running the workflow is the approval; it waits at no environment gate. If it
+fails before the tag, nothing exists and you run it again. If it fails after
+(the publish step), the release is a draft with its tag: **Re-run failed
+jobs** finishes it.
+
+## Shipping a release
+
+Running **Deploy** with a tag ships that release. Nothing is rebuilt: the
+assets are downloaded from the release and checked against its `SHA256SUMS`,
+so what was signed is what ships. The manifest is read from the tagged
+commit. Then, per component: App Services and Functions deploy to the
+staging slot, smoke test, swap, verify, and swap back if production fails
+its health check. Containers get a new revision pointing at the image the
+release pushed. Packages publish the stable version to their feed. `none`
+components are skipped. Each component's `production` deployment is recorded
+against the released commit (`<component> v<version>`, then `success` or
+`failure`).
+
+Shipping an older release than the latest is allowed, with a warning. A
+failed component is re-run with **Re-run failed jobs**, or the whole thing
+is dispatched again with the same tag.
 
 **Checking a release's provenance.** The attestation is signed by this repo's
 release workflow, not by the consuming repo, so name both:
@@ -242,7 +263,7 @@ whichever way it was merged. Nothing else is skipped: the PR's checks run.
 - linear history required while only merge commits are allowed, which no PR
   can satisfy;
 - features the plan doesn't offer, marked `!` rather than failed. For example
-  a private repo on GitHub Free gets no environments, so no release approval.
+  a private repo on GitHub Free gets no environment reviewers.
 
 By hand:
 
@@ -251,9 +272,13 @@ By hand:
    new repos) otherwise fails at startup with "The workflow is requesting …
    but is only allowed …", because a called workflow can't raise permissions.
 2. Edit `.github/components.yml` to describe the components.
-3. Install the local gate (LOCAL-GATE.md). The PR gate fails without a
-   `local/ci` signoff.
-4. Environments `test`, `release` (required reviewers), `production`.
+3. Install the local gate (LOCAL-GATE.md). The PR gate fails without two
+   `local/ci` signoffs, the author's and a reviewer's (`signoffs: 1` on the
+   trigger for a one-person repo).
+4. Environments: none to create. The merge run names `test` and Deploy names
+   `production`; GitHub creates both on first use with no rules. Add required
+   reviewers to `production` only if a second person must approve a deploy
+   someone else started.
 5. Tag the starting version (`v0.1.0`) **before** the merge trigger reaches
    `main`; until a tag exists every merge builds `0.1.0-alpha.0`.
 6. Lock files (below).
@@ -261,7 +286,9 @@ By hand:
    repo variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
    `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, plus `ACR_NAME` for
    `container`; and federated credentials for
-   `repo:ORG/REPO:environment:{test,release,production}`. A repo whose only
+   `repo:ORG/REPO:environment:{test,production}`, plus
+   `repo:ORG/REPO:ref:refs/heads/main` for the container push at release,
+   which runs under no environment. A repo whose only
    Azure use is publishing to Azure Artifacts needs just `AZURE_CLIENT_ID`,
    `AZURE_TENANT_ID` and the credentials: a package's `azure/login` asks for
    no subscription.
@@ -448,9 +475,10 @@ name when moving it (SETUP-GITHUB.md step 2).
   Static Web Apps or a container, not an App Service zip.
 - npm only. `setup-node`'s cache needs `package-lock.json`; yarn and pnpm
   repos need `commands.install` and a lock file npm can read.
-- The `release` environment's automatic deployment record (the approval) is
-  stamped with the dispatch commit, not the released one. Only `production`
-  records are written explicitly.
+- Deploy's `production` job records its deployments by hand against the
+  released commit, because GitHub's automatic record would name the commit
+  the run was dispatched from. Any environment rule on `production` still
+  applies to the job.
 - Version derivation reads PR branch names via `commits/{sha}/pulls`. It
   worked on a public repo without `pull-requests: read`; private repos are
   untested. A failure there is silent: every commit falls back to patch.

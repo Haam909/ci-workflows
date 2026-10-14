@@ -1,0 +1,200 @@
+# Haam909/ci-workflows/.github/workflows/reusable-deploy-to-production.yml
+#
+# Reusable, manual. Ships an existing release to production. The only input is
+# the release's tag; everything else comes from the release itself: its
+# assets, their checksums, and the manifest at the tagged commit. Nothing is
+# rebuilt, so what was signed is what ships.
+#
+# Delivery depends on target, not runtime:
+#
+#   app-service / function  ->  staging slot, smoke test, swap, verify
+#   container               ->  the app is pointed at the image the release pushed
+#   package                 ->  the stable version is published to the feed
+#   none                    ->  nothing; the release was the deliverable
+#
+# Running this workflow is the approval. The job names the `production`
+# environment so a repo can add required reviewers or a branch policy to it
+# later; GitHub creates it with no rules on first use. Each component's
+# deployment is recorded against the released commit, with the tag.
+
+name: deploy-to-production
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'The release to ship, e.g. v1.4.0 (1.4.0 also works)'
+        type: string
+        required: true
+      manifest:
+        type: string
+        default: '.github/components.yml'
+      node-version:
+        type: string
+        default: '22'
+      dotnet-version:
+        type: string
+        default: '9.0.x'
+      python-version:
+        type: string
+        default: '3.12'
+
+# No permissions block: the token is whatever the trigger grants (examples/).
+
+jobs:
+  resolve:
+    name: resolve release ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.target.outputs.tag }}
+      sha: ${{ steps.target.outputs.sha }}
+      version: ${{ steps.target.outputs.version }}
+      components: ${{ steps.read.outputs.components }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find the release
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG}"; [[ "${TAG}" == v* ]] || TAG="v${TAG}"
+
+          DRAFT="$(gh release view "${TAG}" -R "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft 2> "${RUNNER_TEMP}/rel.err")" \
+            || { echo "::error::No release ${TAG}: $(cat "${RUNNER_TEMP}/rel.err"). Run the Release workflow first."; exit 1; }
+          [[ "${DRAFT}" == false ]] || { echo "::error::${TAG} is still a draft: its release run didn't finish."; exit 1; }
+
+          SHA="$(git rev-parse --verify --quiet "refs/tags/${TAG}^{commit}")" \
+            || { echo "::error::Tag ${TAG} is not in this repository."; exit 1; }
+          git merge-base --is-ancestor "${SHA}" "origin/${DEFAULT}" \
+            || { echo "::error::${TAG} (${SHA:0:7}) is not on ${DEFAULT}."; exit 1; }
+
+          LATEST="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "origin/${DEFAULT}" 2>/dev/null || true)"
+          [[ "${LATEST}" == "${TAG}" ]] || echo "::warning::${TAG} is not the latest release (${LATEST}). Shipping an older one is allowed; make sure you mean it."
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "Deploying ${TAG} (${SHA})"
+
+      # The release was built from the manifest at its commit, so deploy it
+      # with that same manifest, not the default branch's.
+      - id: read
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+          MANIFEST: ${{ inputs.manifest }}
+        run: |
+          set -euo pipefail
+          git show "${SHA}:${MANIFEST}" > "${RUNNER_TEMP}/components.yml" \
+            || { echo "::error::${MANIFEST} does not exist at ${SHA:0:7}."; exit 1; }
+          COMPONENTS="$(yq -o=json -I=0 '.components' "${RUNNER_TEMP}/components.yml")"
+          echo "components=${COMPONENTS}" >> "$GITHUB_OUTPUT"
+
+  deliver:
+    name: ${{ matrix.component.name }} -> production
+    needs: resolve
+    runs-on: ubuntu-latest
+    # deployment: false stops GitHub recording this job against the commit the
+    # run was dispatched from (the default branch's head), which isn't the
+    # released commit. The steps below record the real one.
+    environment:
+      name: production
+      deployment: false
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.resolve.outputs.components) }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      NAME: ${{ matrix.component.name }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Record deployment of the released commit
+        id: record
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          ID="$(jq -n --arg ref "${SHA}" --arg c "${NAME}" --arg v "${VERSION}" \
+                  '{ref: $ref, environment: "production", production_environment: true,
+                    auto_merge: false, required_contexts: [],
+                    description: "\($c) v\($v)", payload: {component: $c, version: $v}}' \
+                | gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" --input - --jq .id)"
+          echo "id=${ID}" >> "$GITHUB_OUTPUT"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${ID}/statuses" \
+            -f state=in_progress -f log_url="${RUN_URL}" --silent
+          echo "Deployment ${ID}: ${NAME} v${VERSION} at ${SHA}"
+
+      # Every asset of the release, checked against the SHA256SUMS the
+      # release run wrote. What was signed is what ships.
+      - name: Download and verify release assets
+        run: |
+          set -euo pipefail
+          gh release download "${TAG}" -R "${GITHUB_REPOSITORY}" -D _artifacts
+          (cd _artifacts && sha256sum -c SHA256SUMS)
+
+      - name: Resolve this component's artifact
+        id: artifact
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.component.target }}" == "container" ]]; then
+            echo "path=$(cat "_artifacts/${NAME}.image")" >> "$GITHUB_OUTPUT"
+          else
+            [[ -f "_artifacts/${NAME}.artifact" ]] \
+              || { echo "::error::${TAG} has no asset record for component '${NAME}': it was released from a manifest without it, or by an older ci-workflows."; exit 1; }
+            echo "path=_artifacts/$(cat "_artifacts/${NAME}.artifact")" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: matrix.component.target == 'package' && matrix.component.runtime == 'node'
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - uses: actions/setup-dotnet@v4
+        if: matrix.component.target == 'package' && matrix.component.runtime == 'dotnet'
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - uses: actions/setup-python@v5
+        if: matrix.component.target == 'package' && matrix.component.runtime == 'python'
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      # Services always need Azure. Packages need it only when their feed is
+      # Azure Artifacts, to mint the feed token; that needs no subscription,
+      # so a repo whose only Azure use is Azure Artifacts sets none. A `none`
+      # target has nowhere to go.
+      - uses: azure/login@v2
+        if: (matrix.component.target != 'package' && matrix.component.target != 'none') || contains(matrix.component.feed || '', 'pkgs.dev.azure.com') || contains(matrix.component.feed || '', 'visualstudio.com')
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: ${{ matrix.component.target == 'package' }}
+
+      - uses: Haam909/ci-workflows/actions/deliver-artifact@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          artifact: ${{ steps.artifact.outputs.path }}
+          version: ${{ needs.resolve.outputs.version }}
+          stage: production
+          resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          feed-token: ${{ matrix.component['feed-token-secret'] && secrets[matrix.component['feed-token-secret']] || '' }}
+
+      - name: Record deployment result
+        if: always() && steps.record.outputs.id != ''
+        env:
+          ID: ${{ steps.record.outputs.id }}
+          STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${ID}/statuses" \
+            -f state="${STATE}" -f log_url="${RUN_URL}" --silent
+          echo "- **${NAME}** (${{ matrix.component.runtime }} → ${{ matrix.component.target }}) ${TAG}: ${STATE}" >> "$GITHUB_STEP_SUMMARY"

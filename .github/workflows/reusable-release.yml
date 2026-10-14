@@ -1,0 +1,328 @@
+# Haam909/ci-workflows/.github/workflows/reusable-release.yml
+#
+# Reusable, manual. Marks a commit as a release: derives the version, builds
+# every component from that commit, generates SBOMs, signs, attests, tags, and
+# publishes a GitHub Release with the assets. It deploys nothing. Shipping a
+# release to production is a second manual step, reusable-deploy-to-production.yml.
+#
+# The human decisions are which commit (optional `sha` input; blank means the
+# commit currently live in test) and, rarely, ticking the major box. Running
+# this workflow is the approval; it waits at no environment. There is no
+# version input: the version is always derived.
+#
+# Ordering note: the GitHub Release is created as a draft with every asset
+# attached, the tag is pushed only after those uploads succeed, and the draft
+# is published last. A failed upload leaves no orphan tag behind.
+
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        type: string
+        default: '.github/components.yml'
+      major:
+        type: boolean
+        default: false
+      sha:
+        description: >-
+          Commit to release. Any ancestor of the default branch newer than the
+          last release. Blank releases the commit currently live in test.
+        type: string
+        default: ''
+      node-version:
+        type: string
+        default: '22'
+      dotnet-version:
+        type: string
+        default: '9.0.x'
+      python-version:
+        type: string
+        default: '3.12'
+      sign-private-to-public-log:
+        description: >-
+          Sign a private or internal repo's assets with cosign anyway. Keyless
+          signing records the repo's name in Sigstore's public log.
+        type: boolean
+        default: false
+    outputs:
+      version:
+        value: ${{ jobs.resolve.outputs.version }}
+      tag:
+        value: v${{ jobs.resolve.outputs.version }}
+
+# No permissions block: the token is whatever the trigger grants (examples/).
+
+jobs:
+  resolve:
+    name: resolve target and version
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
+      version: ${{ steps.version.outputs.version }}
+      components: ${{ steps.read.outputs.components }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find the commit to release
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_SHA: ${{ inputs.sha }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          SHA=""; CREATED=""
+
+          if [[ -n "${INPUT_SHA}" ]]; then
+            SHA="$(git rev-parse --verify --quiet "${INPUT_SHA}^{commit}")" \
+              || { echo "::error::${INPUT_SHA} is not a commit in this repository."; exit 1; }
+            SOURCE="chosen"
+          else
+            # The newest test deployment whose latest status is success. Each
+            # component records its own, so this is the newest commit where at
+            # least one component deployed; check the merge run if in doubt.
+            for id in $(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=test&per_page=30" --jq '.[].id'); do
+              state="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}/statuses?per_page=1" --jq '.[0].state // empty')"
+              if [[ "${state}" == "success" ]]; then
+                SHA="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}" --jq '.sha')"
+                CREATED="$(gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}" --jq '.created_at')"
+                break
+              fi
+            done
+            [[ -n "${SHA}" ]] || { echo "::error::No successful deployment to test found. Pass a sha to release a specific commit."; exit 1; }
+            SOURCE="live in test"
+          fi
+
+          git merge-base --is-ancestor "${SHA}" "origin/${DEFAULT}" \
+            || { echo "::error::${SHA} is not an ancestor of ${DEFAULT}."; exit 1; }
+
+          # Versions only move forward: the commit must contain the latest
+          # release. A commit at or behind it would derive a version that
+          # already exists; one on a branch that forked before it (and merged
+          # after) would ship without that release's changes.
+          LATEST="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "origin/${DEFAULT}" 2>/dev/null || true)"
+          if [[ -n "${LATEST}" ]]; then
+            if git merge-base --is-ancestor "${SHA}" "${LATEST}"; then
+              echo "::error::${SHA:0:7} is already included in ${LATEST}. Choose a commit after it."
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "${LATEST}" "${SHA}"; then
+              echo "::error::${SHA:0:7} does not contain ${LATEST}: it branched off before that release. Choose a commit on ${DEFAULT} after it."
+              exit 1
+            fi
+          fi
+
+          if [[ -n "${CREATED}" ]]; then
+            AGE=$(( ( $(date +%s) - $(date -d "${CREATED}" +%s) ) / 86400 ))
+            (( AGE > 14 )) && echo "::warning::The test deployment is ${AGE} days old. Confirm this is what you mean to release."
+          fi
+
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "source=${SOURCE}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${SHA} (${SOURCE})"
+
+      # The checkout above is the dispatch ref (the default branch's head). A
+      # chosen older commit must be built from its own manifest, so read it
+      # from that commit.
+      - id: read
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+          MANIFEST: ${{ inputs.manifest }}
+        run: |
+          set -euo pipefail
+          git show "${SHA}:${MANIFEST}" > "${RUNNER_TEMP}/components.yml" \
+            || { echo "::error::${MANIFEST} does not exist at ${SHA:0:7}."; exit 1; }
+          COMPONENTS="$(yq -o=json -I=0 '.components' "${RUNNER_TEMP}/components.yml")"
+          echo "components=${COMPONENTS}" >> "$GITHUB_OUTPUT"
+          echo "Manifest at ${SHA:0:7}: ${COMPONENTS}"
+
+      - id: version
+        uses: Haam909/ci-workflows/actions/derive-version@v1
+        with:
+          sha: ${{ steps.target.outputs.sha }}
+          force-major: ${{ inputs.major }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### Release v${{ steps.version.outputs.version }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | \`${{ steps.target.outputs.sha }}\` (${{ steps.target.outputs.source }}) |"
+            echo "| Previous | ${{ steps.version.outputs.previous-tag }} |"
+            echo "| Bump | ${{ steps.version.outputs.bump }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: build ${{ matrix.component.name }}
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        component: ${{ fromJSON(needs.resolve.outputs.components) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: Haam909/ci-workflows/actions/install-toolchain@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          node-version: ${{ inputs.node-version }}
+          dotnet-version: ${{ inputs.dotnet-version }}
+          python-version: ${{ inputs.python-version }}
+
+      # A container image has to live in a registry, so it is pushed now,
+      # at release, and deploy-to-production points the app at it later.
+      - uses: azure/login@v2
+        if: matrix.component.target == 'container'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        if: matrix.component.target == 'container'
+        run: az acr login --name "${{ vars.ACR_NAME }}"
+
+      # Locked installs are what make this rebuild from the tested commit
+      # resolve to the same dependencies, rather than checking afterwards.
+      - id: build
+        uses: Haam909/ci-workflows/actions/build-artifact@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          version: ${{ needs.resolve.outputs.version }}
+          registry: ${{ vars.ACR_NAME && format('{0}.azurecr.io', vars.ACR_NAME) || '' }}
+
+      # ---------- SBOM: release deliverable, generated once, here ----------
+
+      - name: SBOM
+        uses: Haam909/ci-workflows/actions/generate-sbom@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          version: ${{ needs.resolve.outputs.version }}
+
+      # cosign's keyless signing writes the signing certificate, which names
+      # this repo and workflow, to Sigstore's public transparency log. That is
+      # fine for a public repo and a leak for a private one, so a private repo
+      # signs only if it opts in. GitHub's attestation (next) covers it there.
+      - uses: sigstore/cosign-installer@v3
+        if: github.event.repository.visibility == 'public' || inputs.sign-private-to-public-log
+
+      - name: Sign
+        if: github.event.repository.visibility == 'public' || inputs.sign-private-to-public-log
+        env:
+          IMAGE: ${{ steps.build.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Containers are signed by digest in the registry; everything else
+          # is signed as a blob with a detached bundle.
+          if [[ "${{ matrix.component.target }}" == "container" ]]; then
+            cosign sign --yes "${IMAGE}"
+          fi
+          for f in _artifacts/*.zip _artifacts/*.nupkg _artifacts/*.tgz _artifacts/*.whl _artifacts/*.tar.gz _artifacts/*.cdx.json; do
+            cosign sign-blob --yes "$f" --bundle "${f}.cosign.bundle"
+          done
+
+      # Attestations work in public repos on every plan, and in private ones
+      # only on GitHub Enterprise Cloud. A private repo elsewhere gets a
+      # warning instead of a failed release.
+      - uses: actions/attest-build-provenance@v2
+        id: attest
+        if: matrix.component.target != 'container'
+        continue-on-error: ${{ github.event.repository.visibility != 'public' }}
+        with:
+          subject-path: |
+            _artifacts/*.zip
+            _artifacts/*.nupkg
+            _artifacts/*.tgz
+            _artifacts/*.whl
+
+      - name: Note what wasn't signed
+        if: steps.attest.outcome == 'failure' || (github.event.repository.visibility != 'public' && !inputs.sign-private-to-public-log)
+        env:
+          ATTEST: ${{ steps.attest.outcome }}
+        run: |
+          {
+            echo "### ${{ matrix.component.name }}: provenance"
+            [[ "${ATTEST}" == failure ]] && echo "- No attestation: GitHub offers them on private repos only with Enterprise Cloud."
+            [[ "${{ github.event.repository.visibility }}" != public && "${{ inputs.sign-private-to-public-log }}" != true ]] \
+              && echo "- No cosign bundles: this repo is ${{ github.event.repository.visibility }}, and they'd publish its name to Sigstore's public log (input sign-private-to-public-log)."
+            echo "- SHA256SUMS in the release still covers every asset."
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ "${ATTEST}" == failure ]] && echo "::warning::${{ matrix.component.name }}: no attestation (private repo without Enterprise Cloud)" || true
+
+      # deploy-to-production finds each component's artifact among the
+      # release assets by these two small files, so it never has to guess
+      # from file names (a nupkg is named by PackageId, not component).
+      - name: Record what was built
+        env:
+          ARTIFACT: ${{ steps.build.outputs.artifact }}
+          NAME: ${{ matrix.component.name }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.component.target }}" == "container" ]]; then
+            echo "${ARTIFACT}" > "_artifacts/${NAME}.image"
+          else
+            basename "${ARTIFACT}" > "_artifacts/${NAME}.artifact"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.component.name }}
+          path: _artifacts/
+          retention-days: 90
+          if-no-files-found: error
+
+  publish:
+    name: tag and publish release
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      TARGET_SHA: ${{ needs.resolve.outputs.sha }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: _artifacts
+
+      - name: Checksums
+        run: cd _artifacts && sha256sum * > SHA256SUMS
+
+      - name: Create draft release with assets
+        run: |
+          gh release create "v${VERSION}" _artifacts/* \
+            --target "${TARGET_SHA}" --title "v${VERSION}" \
+            --generate-notes --draft
+
+      - name: Push tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" "${TARGET_SHA}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Publish release
+        run: |
+          gh release edit "v${VERSION}" --draft=false -R "${GITHUB_REPOSITORY}"
+          {
+            echo "Released **v${VERSION}** from \`${TARGET_SHA:0:7}\`."
+            echo ""
+            echo "To ship it: Actions → Deploy → Run workflow, tag \`v${VERSION}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
