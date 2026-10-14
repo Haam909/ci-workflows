@@ -1,18 +1,19 @@
 # Haam909/ci-workflows/.github/workflows/reusable-deploy-to-test.yml
 #
-# Reusable. On merge to main, builds every component and delivers it to test.
-# Delivery depends on target, not runtime:
+# Reusable. On merge to main, tests, builds and delivers every component to
+# test. Delivery depends on target, not runtime:
 #
 #   app-service / function  ->  zip deploy to the test app
 #   container               ->  image pushed to ACR, test Container App updated
 #   package                 ->  prerelease published to the feed
 #
 # All of them run under `environment: test`, so a GitHub deployment record
-# exists either way and reusable-release-to-production.yml can read it to find the commit to ship.
+# exists either way and reusable-release.yml can read it to find the commit to
+# release. GitHub creates the environment on first use; it needs no rules.
 #
 # Versions here are prereleases (1.4.0-alpha.12). For packages that is the
 # point: consumers can try the change. For services it is just a build label,
-# and production gets a clean version from reusable-release-to-production.yml.
+# and the release gets a clean version from reusable-release.yml.
 
 name: deploy-to-test
 
@@ -77,11 +78,20 @@ jobs:
           dotnet-version: ${{ inputs.dotnet-version }}
           python-version: ${{ inputs.python-version }}
 
+      # The developer machines ran these before the merge; this is the
+      # backstop for two machines with the same stale SDK. A failing component
+      # isn't deployed; the others still are (fail-fast is off).
+      - uses: Haam909/ci-workflows/actions/run-tests@v1
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          manifest: ${{ inputs.manifest }}
+
       # Services always need Azure. Packages need it only when their feed is
       # Azure Artifacts, to mint the feed token; that needs no subscription,
-      # so a repo whose only Azure use is Azure Artifacts sets none.
+      # so a repo whose only Azure use is Azure Artifacts sets none. A `none`
+      # target is built and never delivered, so it needs nothing.
       - uses: azure/login@v2
-        if: matrix.component.target != 'package' || contains(matrix.component.feed || '', 'pkgs.dev.azure.com') || contains(matrix.component.feed || '', 'visualstudio.com')
+        if: (matrix.component.target != 'package' && matrix.component.target != 'none') || contains(matrix.component.feed || '', 'pkgs.dev.azure.com') || contains(matrix.component.feed || '', 'visualstudio.com')
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}

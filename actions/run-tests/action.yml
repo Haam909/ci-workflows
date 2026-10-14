@@ -1,0 +1,28 @@
+name: 'Run tests'
+description: >-
+  Runs one component's unit and integration tests in CI with the copy of
+  bin/ci that ships with ci-workflows, so the commands and the manifest's
+  commands.* overrides are the same ones the developer's gate ran. The
+  consuming repo's own bin/ci is not used: it can be stale or edited.
+
+inputs:
+  component:
+    description: 'Component object as JSON'
+    required: true
+  manifest:
+    default: '.github/components.yml'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        C: ${{ inputs.component }}
+        CI_MANIFEST: ${{ inputs.manifest }}
+        CI: 'true'
+      run: |
+        set -euo pipefail
+        NAME="$(jq -r '.name' <<< "$C")"
+        # The runner downloads the whole ci-workflows repo for this action,
+        # so local/bin/ci sits two directories up from here.
+        "${GITHUB_ACTION_PATH}/../../local/bin/ci" --only "${NAME}" --tests
