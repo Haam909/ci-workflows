@@ -103,7 +103,7 @@ DEFAULT="$(default_branch)" || exit 1
 render_trigger() {         # file
   sed -e "s#^\(    branches: \)\[main\]#\1[${DEFAULT}]#" \
       -e "s#^name: Merge to main#name: Merge to ${DEFAULT}#" \
-      -e "s#^\(    uses: Haam909/ci-workflows/.*\)@v1\$#\1@${REF}#" \
+      -e "s#^\(    uses: Haam909/ci-workflows/.*\)@v2\$#\1@${REF}#" \
       "${CIW}/examples/.github/workflows/$1"
 }
 
