@@ -56,10 +56,10 @@ on GitHub Packages, and on Azure Artifacts when `AZDO_ORG` is set. The result is
 `results/<row>.md` is a copy of the latest. Old run directories under `$WORK`
 and `results/` are safe to delete.
 
-## Testing a change before v1 moves
+## Testing a change before v2 moves
 
 The sandboxes' triggers call ci-workflows at a ref, and the reusable workflows
-call this repo's actions at `@v1`. To test a commit end to end:
+call this repo's actions at `@v2`. To test a commit end to end:
 
 ```bash
 REF="$(tests/onboard/stage)"                 # pushes test/stage-<sha>

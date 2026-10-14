@@ -1,7 +1,7 @@
 # Haam909/ci-workflows/.github/workflows/self-test.yml
 #
-# Tests this repo's own actions before `v1` moves: builds each fixture in
-# tests/components.yml with the actions from this checkout (not @v1), then
+# Tests this repo's own actions before `v2` moves: builds each fixture in
+# tests/components.yml with the actions from this checkout (not @v2), then
 # checks the artifact and the SBOM. No consumer repo, release or version is
 # involved.
 #

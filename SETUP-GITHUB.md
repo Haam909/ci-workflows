@@ -108,20 +108,20 @@ Check it worked — this should print your name:
 grep -rn 'uses: .*/ci-workflows' .github/workflows | head -3
 ```
 
-## Step 3 — Tag it `v1`
+## Step 3 — Tag it `v2`
 
-Your other repos will refer to `@v1`. That tag has to exist or every run
+Your other repos will refer to `@v2`. That tag has to exist or every run
 fails immediately with "unable to resolve action".
 
 ```bash
-git tag -a v1 -m "v1"
-git push origin v1
+git tag -a v2 -m "v2"
+git push origin v2
 ```
 
 While you're still changing things, move the tag rather than making new ones:
 
 ```bash
-git tag -f v1 && git push -f origin v1
+git tag -f v2 && git push -f origin v2
 ```
 
 Forgetting this is the single most common reason a change "doesn't do
@@ -435,7 +435,7 @@ published the package starts with **Admin**.
 ## Troubleshooting
 
 **"unable to resolve action … repository not found"**
-The `v1` tag doesn't exist in `ci-workflows`, or the org name wasn't replaced,
+The `v2` tag doesn't exist in `ci-workflows`, or the org name wasn't replaced,
 or the repo is private and hasn't granted access. Check step 2 and step 3.
 
 **"workflow was not found"**
@@ -443,7 +443,7 @@ Same causes. Also check the filename in the `uses:` line matches exactly —
 it's `reusable-verify-pull-request.yml`, not `checks.yml`.
 
 **My change to ci-workflows did nothing**
-You didn't move the `v1` tag. `git tag -f v1 && git push -f origin v1`.
+You didn't move the `v2` tag. `git tag -f v2 && git push -f origin v2`.
 
 **"Dependencies lock file is not found"**
 `package-lock.json` is missing, or `path:` in `components.yml` points at the

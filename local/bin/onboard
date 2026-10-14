@@ -16,7 +16,7 @@
 #                         Default: you.
 #   --no-deploy-to-test   leave out trigger-merge-to-main.yml, for a repo with
 #                         no test environment to deploy to yet
-#   --ref REF             the ci-workflows ref the triggers call (default: v1)
+#   --ref REF             the ci-workflows ref the triggers call (default: v2)
 #
 # Safe to re-run. Each step looks first and only adds what is missing. It never
 # overwrites a workflow, environment or ruleset that already exists; `check`
@@ -39,7 +39,7 @@ ONBOARD_BRANCH=chore/onboard-ci
 ONBOARD_SUBJECT="ci: onboard to ci-workflows"     # the merge trigger skips commits starting with this
 MARK='# onboard: check this'
 CMD="${1:-}"; [[ $# -gt 0 ]] && shift
-REVIEWERS=(); DEPLOY_TO_TEST=true; REF=v1
+REVIEWERS=(); DEPLOY_TO_TEST=true; REF=v2
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

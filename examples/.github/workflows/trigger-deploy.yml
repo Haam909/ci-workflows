@@ -22,7 +22,7 @@ permissions:
   packages: write          # packages publish their stable version now
 jobs:
   ci:
-    uses: Haam909/ci-workflows/.github/workflows/reusable-deploy-to-production.yml@v1
+    uses: Haam909/ci-workflows/.github/workflows/reusable-deploy-to-production.yml@v2
     with:
       tag: ${{ inputs.tag }}
     secrets: inherit
