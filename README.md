@@ -299,7 +299,9 @@ the Feed, the app registration and the credentials from nothing.
 
 Publishing has been run end to end for dotnet and node to GitHub Packages and
 for all three runtimes to an org-scoped and a project-scoped Azure Artifacts
-Feed, including a Deploy re-run of the same tag on all three (RideAlong 20).
+Feed, including a Deploy re-run of the same tag on all three (RideAlong 20),
+and a Deploy whose one refused publish was finished with **Re-run failed jobs**
+(RideAlong 24).
 
 **Other feeds** (npmjs.org, PyPI, Artifactory, Nexus) can't use OIDC, so put
 the token in a repository secret and name it on the component:
