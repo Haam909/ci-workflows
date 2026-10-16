@@ -20,6 +20,7 @@ actions/
     prefixes                   the branch prefixes and their bumps; the one list
   check-branch-name/           PR gate: the branch has a prefix from that list
 SETUP-GITHUB.md                step-by-step setup, no prior CI experience assumed
+SETUP-ACCOUNTS.md              Azure DevOps, Azure Artifacts, Entra; the enterprise trials
 LOCAL-GATE.md                  pre-push hook, local unit tests, signoff
 tests/                         self-test manifest and fixture projects
 local/                         bin/ci, bin/signoff, pre-push hook to copy into a repo
@@ -224,17 +225,16 @@ Without `--signer-repo` it fails with `verifying with issuer "sigstore.dev"`.
 7. Only if a component deploys to Azure, or publishes to or installs from
    Azure Artifacts: repo variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
    `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, plus `ACR_NAME` for
-   `container`; and federated credentials for
-   `repo:ORG/REPO:environment:{test,production}`, plus
-   `repo:ORG/REPO:ref:refs/heads/main` for the container push at release,
-   which runs under no environment, and for the Release build of a component
-   that installs from Azure Artifacts. A repo whose only Azure use is
-   publishing to or installing from Azure Artifacts needs just
-   `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and the credentials: those logins ask
-   for no subscription. Read the subject prefix from
-   `gh api repos/ORG/REPO/actions/oidc/customization/sub`: newer repos carry
-   owner and repo IDs in it (`repo:ORG@OWNER_ID/REPO@REPO_ID`), so the plain
-   `repo:ORG/REPO` form does not match them.
+   `container`; and federated credentials on the app that accept the repo's
+   tokens for the `test` and `production` environments and for
+   `ref:refs/heads/main`. The Release build runs under no environment, from
+   `main`, and with `AZURE_CLIENT_ID` set it logs in to Azure in every job, so
+   every such repo needs the `main` one. SETUP-ACCOUNTS.md steps 9 to 11 add two
+   flexible credentials that cover every repo of the owner whose name starts
+   with a chosen prefix; a repo named that way needs nothing new in Entra.
+   A repo whose only Azure use is publishing to or installing from Azure
+   Artifacts needs just `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and the
+   credentials: those logins ask for no subscription.
 
 A repo whose components are all `package` on GitHub Packages needs no Azure
 configuration at all — `azure/login` is skipped.
@@ -294,7 +294,8 @@ the feed. No PAT is created or stored. The repo also needs the
 `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` variables and the federated
 credentials from "Onboarding a repo", because the token comes from
 `azure/login`. It needs `AZURE_SUBSCRIPTION_ID` only if a component also
-deploys to Azure.
+deploys to Azure. SETUP-ACCOUNTS.md walks through the Azure DevOps organization,
+the Feed, the app registration and the credentials from nothing.
 
 Publishing has been run end to end for dotnet and node to GitHub Packages and
 for all three runtimes to an org-scoped and a project-scoped Azure Artifacts
