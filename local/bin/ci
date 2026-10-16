@@ -16,8 +16,9 @@
 # what runs here is what runs there. Commands can be overridden per component
 # with a `commands:` block, and this script honours those too.
 #
-# Needs: bash, yq. Plus the toolchain for whatever your components use, and gh
-# logged in with read:packages if a nuget.config or .npmrc names GitHub Packages.
+# Needs: bash, yq. Plus the toolchain for whatever your components use; gh
+# logged in with read:packages if a nuget.config or .npmrc names GitHub Packages;
+# az logged in if a nuget.config, .npmrc or requirements file names Azure Artifacts.
 
 set -uo pipefail
 
@@ -80,10 +81,11 @@ summary_and_exit() {
 # BEGIN feed-credentials
 # The same block is in local/bin/ci and actions/install-toolchain/action.yml;
 # change both. A component installs from whatever Feed the repo's own
-# nuget.config or .npmrc names (ADR 0002). This only works out which of those
-# Feeds need a credential from us, chosen by the Feed's host, and hands it to
-# dotnet and npm through the environment and a user-level npmrc outside the
-# work tree. Every other Feed is left to the repo's own configuration.
+# nuget.config, .npmrc or requirements file names (ADR 0002). This only works
+# out which of those Feeds need a credential from us, chosen by the Feed's
+# host, and hands it to dotnet, npm and pip through the environment and
+# user-level files outside the work tree. Every other Feed is left to the
+# repo's own configuration.
 
 # pkg_domain <host>: GitHub Packages for a Host: pkg.github.com on github.com,
 # the Host itself on a <tenant>.ghe.com tenant (nuget.<tenant>.ghe.com,
@@ -103,13 +105,15 @@ feed_host() {
 }
 
 # feed_kind <url> <pkg domain>: who supplies the Feed's credential. "github"
-# for GitHub Packages on this Host; nothing for any other Feed. Azure Artifacts
-# hosts (#19) get their own kind here.
+# for GitHub Packages on this Host, "azure" for Azure Artifacts (the hosts
+# deliver-artifact publishes to with an Entra token); nothing for any other Feed.
 feed_kind() {
   local host
   host="$(feed_host "$1")"
   if [[ -n "$2" && ( "${host}" == "nuget.$2" || "${host}" == "npm.$2" ) ]]; then
     echo github
+  elif [[ "${host}" == pkgs.dev.azure.com || "${host}" == *.visualstudio.com ]]; then
+    echo azure
   fi
 }
 
@@ -132,7 +136,9 @@ nuget_sources() {
 }
 
 # npm_registries <package dir>: each registry URL (registry= and
-# @scope:registry=) in the package's own .npmrc, the project config npm reads.
+# @scope:registry=) in the package's own .npmrc. That is the only project
+# config npm reads; an .npmrc in a parent folder, the repo root's included,
+# is not read for a package below it.
 npm_registries() {
   local f="$1/.npmrc"
   if [[ -f "${f}" ]]; then
@@ -141,43 +147,74 @@ npm_registries() {
   fi
 }
 
-# github_feeds <runtime> <pkg domain> <repo root> <component dir> [project...]
-# One line per GitHub Packages Feed the component's package config names:
-#   nuget<TAB><source name><TAB><url>     npm<TAB><registry url>
-github_feeds() {
-  local runtime="$1" pkg="$2" root="$3" dir="$4" p name url
+# pip_indexes <dir>: each --index-url, -i and --extra-index-url line in the
+# component's requirements*.txt files. pip reads no config file from the work
+# tree, so those lines are where a repo names its index.
+pip_indexes() {
+  local f
+  for f in "$1"/requirements*.txt; do
+    if [[ -f "${f}" ]]; then
+      tr -d '\r' < "${f}" \
+        | sed -n -E 's/^[[:space:]]*(--index-url|--extra-index-url|-i)([[:space:]]*=[[:space:]]*|[[:space:]]+)([^[:space:]]+).*$/\3/p'
+    fi
+  done
+}
+
+# package_feeds <runtime> <pkg domain> <repo root> <component dir> [project...]
+# One line per GitHub Packages or Azure Artifacts Feed the component's package
+# config names, its kind (feed_kind) first:
+#   <kind><TAB>nuget<TAB><source name><TAB><url>
+#   <kind><TAB>npm<TAB><registry url>
+#   <kind><TAB>pip<TAB><index url>
+package_feeds() {
+  local runtime="$1" pkg="$2" root="$3" dir="$4" p name url kind
   shift 4
-  [[ -n "${pkg}" ]] || return 0
   case "${runtime}" in
     dotnet)
       [[ $# -gt 0 ]] || set -- .
       for p in "$@"; do nuget_sources "${dir}/$(dirname "${p}")" "${root}"; done \
         | sort -u | while IFS=$'\t' read -r name url; do
-            if [[ "$(feed_kind "${url}" "${pkg}")" == github ]]; then
-              printf 'nuget\t%s\t%s\n' "${name}" "${url}"
-            fi
+            kind="$(feed_kind "${url}" "${pkg}")"
+            if [[ -n "${kind}" ]]; then printf '%s\tnuget\t%s\t%s\n' "${kind}" "${name}" "${url}"; fi
           done ;;
     node)
       npm_registries "${dir}" | sort -u | while read -r url; do
-        if [[ "$(feed_kind "${url}" "${pkg}")" == github ]]; then
-          printf 'npm\t%s\n' "${url}"
-        fi
+        kind="$(feed_kind "${url}" "${pkg}")"
+        if [[ -n "${kind}" ]]; then printf '%s\tnpm\t%s\n' "${kind}" "${url}"; fi
+      done ;;
+    python)
+      pip_indexes "${dir}" | sort -u | while read -r url; do
+        kind="$(feed_kind "${url}" "${pkg}")"
+        if [[ -n "${kind}" ]]; then printf '%s\tpip\t%s\n' "${kind}" "${url}"; fi
       done ;;
   esac
 }
 
-# feed_credentials <token> <user> <npmrc> <feeds>: sets CRED_ENV to the
-# environment that gives <token> to each Feed in <feeds> (github_feeds lines):
-# NuGet's NuGetPackageSourceCredentials_<source name>, and for npm a user
-# config at <npmrc> holding the current user config plus the token.
+# feed_hosts <feeds>: the distinct hosts in package_feeds lines, comma-separated.
+feed_hosts() {
+  local line
+  while IFS= read -r line; do
+    if [[ -n "${line}" ]]; then feed_host "${line##*$'\t'}"; fi
+  done <<< "$1" | sort -u | paste -sd, - | sed 's/,/, /g'
+}
+
+# feed_credentials <kind> <token> <user> <npmrc> <netrc> <feeds>: adds to
+# CRED_ENV the environment that gives <token> to each Feed of <kind> in
+# <feeds> (package_feeds lines): NuGet's NuGetPackageSourceCredentials_<source
+# name>; for npm a user config at <npmrc> holding the current user config plus
+# the token; for pip a netrc at <netrc> holding the current one plus the token.
 feed_credentials() {
-  local token="$1" user="$2" npmrc="$3" kind a b base reg
-  CRED_ENV=()
-  while IFS=$'\t' read -r kind a b; do
-    case "${kind}" in
+  local want="$1" token="$2" user="$3" npmrc="$4" netrc="$5" label kind tool a b base reg
+  case "${want}" in
+    github) label="GitHub Packages" ;;
+    *)      label="Azure Artifacts" ;;
+  esac
+  while IFS=$'\t' read -r kind tool a b; do
+    [[ "${kind}" == "${want}" ]] || continue
+    case "${tool}" in
       nuget)
         CRED_ENV+=("NuGetPackageSourceCredentials_${a}=Username=${user};Password=${token}")
-        echo "Feed: GitHub Packages, NuGet source '${a}' (${b})" ;;
+        echo "Feed: ${label}, NuGet source '${a}' (${b})" ;;
       npm)
         if [[ ! -s "${npmrc}" ]]; then
           base="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${HOME}/.npmrc}}"
@@ -186,15 +223,30 @@ feed_credentials() {
           CRED_ENV+=("npm_config_userconfig=${base}" "NPM_CONFIG_USERCONFIG=${base}")
         fi
         # npm keys a token by the registry URL minus its scheme, with a
-        # trailing slash; tarballs are fetched from the host's root.
+        # trailing slash. GitHub Packages serves tarballs from the host's
+        # root, Azure Artifacts from below the registry URL.
         reg="${a#*:}"; reg="${reg%/}/"
         printf '%s:_authToken=%s\n' "${reg}" "${token}" >> "${npmrc}"
-        if [[ "${reg}" != "//$(feed_host "${a}")/" ]]; then
+        if [[ "${kind}" == github && "${reg}" != "//$(feed_host "${a}")/" ]]; then
           printf '%s:_authToken=%s\n' "//$(feed_host "${a}")/" "${token}" >> "${npmrc}"
         fi
-        echo "Feed: GitHub Packages, npm registry ${a}" ;;
+        echo "Feed: ${label}, npm registry ${a}" ;;
+      pip)
+        # pip takes a host's credentials from a netrc when the index URL
+        # carries none. NETRC points it at this one, which starts as a copy
+        # of the user's own.
+        if [[ ! -s "${netrc}" ]]; then
+          base="${NETRC:-${HOME}/.netrc}"
+          if [[ -z "${NETRC:-}" && ! -f "${base}" ]]; then base="${HOME}/_netrc"; fi
+          ( umask 077; { if [[ -f "${base}" ]]; then cat "${base}"; echo; fi; echo "# feed credentials"; } > "${netrc}" )
+          if command -v cygpath > /dev/null; then base="$(cygpath -m "${netrc}")"; else base="${netrc}"; fi
+          CRED_ENV+=("NETRC=${base}")
+        fi
+        reg="$(printf 'machine %s login %s password %s' "$(feed_host "${a}")" "${user}" "${token}")"
+        if ! grep -qxF -- "${reg}" "${netrc}"; then printf '%s\n' "${reg}" >> "${netrc}"; fi
+        echo "Feed: ${label}, pip index ${a}" ;;
     esac
-  done <<< "$4"
+  done <<< "$6"
 }
 
 # with_feed_credentials <command>: runs the command with CRED_ENV in its
@@ -215,9 +267,11 @@ with_feed_credentials() {
 
 # A component whose nuget.config or .npmrc names GitHub Packages on this repo's
 # Host installs with the token of your gh login on that Host. The Host is read
-# from the origin remote. In GitHub Actions, install-toolchain has already
-# installed with the workflow token, so the restore below finds every package
-# in the local cache and needs none.
+# from the origin remote. One whose nuget.config, .npmrc or requirements file
+# names Azure Artifacts installs with an Entra token from your az login. In
+# GitHub Actions, install-toolchain has already installed with the workflow's
+# credentials, so the restore below finds every package in the local cache and
+# needs none.
 # Relative, so it compares with the component folders whatever the path style.
 REPO_ROOT="$(git rev-parse --show-cdup 2> /dev/null)"; REPO_ROOT="${REPO_ROOT:-.}"
 GH_LOGIN_HOST="$(git remote get-url origin 2> /dev/null || true)"
@@ -226,7 +280,7 @@ GH_LOGIN_HOST="$(printf '%s' "${GH_LOGIN_HOST}" | tr '[:upper:]' '[:lower:]')"
 if [[ "${GH_LOGIN_HOST}" == ssh.github.com ]]; then GH_LOGIN_HOST=github.com; fi
 PKG="$(pkg_domain "${GH_LOGIN_HOST}")"
 if [[ "${GITHUB_ACTIONS:-}" == true ]]; then PKG=""; fi
-FEED_TOKEN=""; FEED_USER=""; CRED_FILES=()
+FEED_TOKEN=""; FEED_USER=""; AZ_TOKEN=""; CRED_FILES=()
 trap 'rm -f ${CRED_FILES[@]+"${CRED_FILES[@]}"}' EXIT
 
 # gh_feed_token <component> <feeds>: the gh token for GitHub Packages on the
@@ -235,7 +289,7 @@ trap 'rm -f ${CRED_FILES[@]+"${CRED_FILES[@]}"}' EXIT
 gh_feed_token() {
   local feeds resp scopes
   [[ -n "${FEED_TOKEN}" ]] && return 0
-  feeds="$(cut -f2- <<< "$2" | tr '\t' ' ' | sed 's/^/    /')"
+  feeds="$(cut -f3- <<< "$2" | tr '\t' ' ' | sed 's/^/    /')"
   if ! command -v gh > /dev/null || ! FEED_TOKEN="$(gh auth token --hostname "${GH_LOGIN_HOST}" 2> /dev/null)" || [[ -z "${FEED_TOKEN}" ]]; then
     echo "${RED}✗ $1 installs from GitHub Packages on ${GH_LOGIN_HOST}, and gh has no login there.${OFF}" >&2
     echo "${feeds}" >&2
@@ -256,6 +310,32 @@ gh_feed_token() {
     exit 2
   fi
   FEED_USER="${FEED_USER:-gh}"
+}
+
+# az_feed_token <component> <feeds>: an Entra token for Azure Artifacts from
+# your az login, once per run. 499b84ac-... is the Azure DevOps resource ID.
+# Exits when az is missing or has no login.
+az_feed_token() {
+  local feeds hosts
+  [[ -n "${AZ_TOKEN}" ]] && return 0
+  if ! command -v az > /dev/null \
+     || ! AZ_TOKEN="$(az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv 2> /dev/null | tr -d '\r')" \
+     || [[ -z "${AZ_TOKEN}" ]]; then
+    AZ_TOKEN=""
+    feeds="$(cut -f3- <<< "$2" | tr '\t' ' ' | sed 's/^/    /')"
+    hosts="$(feed_hosts "$2")"
+    if command -v az > /dev/null; then
+      echo "${RED}✗ $1 installs from Azure Artifacts on ${hosts}, and az has no login.${OFF}" >&2
+      echo "${feeds}" >&2
+    else
+      echo "${RED}✗ $1 installs from Azure Artifacts on ${hosts}, and az (the Azure CLI) is not installed.${OFF}" >&2
+      echo "${feeds}" >&2
+      echo "  Install it: https://learn.microsoft.com/cli/azure/install-azure-cli" >&2
+    fi
+    echo "  Log in, then run bin/ci again:" >&2
+    echo "    ${GREY}az login --allow-no-subscriptions${OFF}" >&2
+    exit 2
+  fi
 }
 
 # with_creds <command>: the command as step() should run it, with the Feed
@@ -297,19 +377,29 @@ for (( i=0; i<COUNT; i++ )); do
     done
   fi
 
-  # Credentials for any GitHub Packages Feed the install or the locked restore
-  # reads from. With no such Feed, CRED_ENV stays empty and nothing changes.
+  # Credentials for any GitHub Packages or Azure Artifacts Feed the install or
+  # the locked restore reads from. With no such Feed, CRED_ENV stays empty,
+  # neither gh nor az is called, and nothing changes.
   CRED_ENV=()
   if [[ "${INSTALL}" == true || -n "${RESTORE}" ]]; then
     PROJECTS=()
     for P in "${PROJECT}" "${TESTPROJ}" "${INTEGRATION}"; do
       if [[ -n "${P}" ]]; then PROJECTS+=("${P}"); fi
     done
-    FEEDS="$(github_feeds "${RUNTIME}" "${PKG}" "${REPO_ROOT}" "${DIR}" ${PROJECTS[@]+"${PROJECTS[@]}"})"
+    FEEDS=""
+    if [[ "${GITHUB_ACTIONS:-}" != true ]]; then
+      FEEDS="$(package_feeds "${RUNTIME}" "${PKG}" "${REPO_ROOT}" "${DIR}" ${PROJECTS[@]+"${PROJECTS[@]}"})"
+    fi
     if [[ -n "${FEEDS}" ]]; then
-      gh_feed_token "${NAME}" "${FEEDS}"
-      NPMRC="$(mktemp)"; CRED_FILES+=("${NPMRC}")
-      feed_credentials "${FEED_TOKEN}" "${FEED_USER}" "${NPMRC}" "${FEEDS}"
+      NPMRC="$(mktemp)"; NETRC_FILE="$(mktemp)"; CRED_FILES+=("${NPMRC}" "${NETRC_FILE}")
+      if grep -q '^github' <<< "${FEEDS}"; then
+        gh_feed_token "${NAME}" "$(grep '^github' <<< "${FEEDS}")"
+        feed_credentials github "${FEED_TOKEN}" "${FEED_USER}" "${NPMRC}" "${NETRC_FILE}" "${FEEDS}"
+      fi
+      if grep -q '^azure' <<< "${FEEDS}"; then
+        az_feed_token "${NAME}" "$(grep '^azure' <<< "${FEEDS}")"
+        feed_credentials azure "${AZ_TOKEN}" azure-artifacts "${NPMRC}" "${NETRC_FILE}" "${FEEDS}"
+      fi
     fi
   fi
 
