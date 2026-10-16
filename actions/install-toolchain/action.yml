@@ -19,19 +19,6 @@ inputs:
       Token for a GitHub Packages Feed that the component's nuget.config or
       .npmrc names. Needs packages: read on the calling workflow.
     default: ${{ github.token }}
-  feeds-only:
-    description: >-
-      'true': install nothing, only set the azure-artifacts output. The
-      workflows call this before azure/login to decide whether to log in.
-    default: 'false'
-
-outputs:
-  azure-artifacts:
-    description: >-
-      'true' when the component's nuget.config, .npmrc or requirements files
-      name an Azure Artifacts Feed, so the Azure CLI must be logged in before
-      the install.
-    value: ${{ steps.install.outputs.azure-artifacts }}
 
 runs:
   using: composite
@@ -39,7 +26,7 @@ runs:
     # Node covers TypeScript and plain JavaScript alike. npm is assumed:
     # setup-node's npm cache needs package-lock.json.
     - uses: actions/setup-node@v4
-      if: fromJSON(inputs.component).runtime == 'node' && inputs.feeds-only != 'true'
+      if: fromJSON(inputs.component).runtime == 'node'
       with:
         node-version: ${{ fromJSON(inputs.component).node-version || inputs.node-version }}
         cache: npm
@@ -47,12 +34,12 @@ runs:
         registry-url: ${{ inputs.registry-url }}
 
     - uses: actions/setup-dotnet@v4
-      if: fromJSON(inputs.component).runtime == 'dotnet' && inputs.feeds-only != 'true'
+      if: fromJSON(inputs.component).runtime == 'dotnet'
       with:
         dotnet-version: ${{ fromJSON(inputs.component).dotnet-version || inputs.dotnet-version }}
 
     - uses: actions/setup-python@v5
-      if: fromJSON(inputs.component).runtime == 'python' && inputs.feeds-only != 'true'
+      if: fromJSON(inputs.component).runtime == 'python'
       with:
         python-version: ${{ fromJSON(inputs.component).python-version || inputs.python-version }}
         cache: pip
@@ -67,7 +54,6 @@ runs:
       env:
         C: ${{ inputs.component }}
         FEED_TOKEN: ${{ inputs.token }}
-        FEEDS_ONLY: ${{ inputs.feeds-only }}
       run: |
         set -euo pipefail
 
@@ -275,23 +261,6 @@ runs:
         done
         FEEDS="$(package_feeds "${RUNTIME}" "${PKG}" "${GITHUB_WORKSPACE}" . ${PROJECTS[@]+"${PROJECTS[@]}"})"
         AZURE_FEEDS="$(grep '^azure' <<< "${FEEDS}" || true)"
-        if [[ -n "${AZURE_FEEDS}" ]]; then
-          echo "azure-artifacts=true" >> "${GITHUB_OUTPUT}"
-        else
-          echo "azure-artifacts=false" >> "${GITHUB_OUTPUT}"
-        fi
-
-        # feeds-only: the workflow asks, before azure/login, whether this
-        # component needs it. Nothing is installed.
-        if [[ "${FEEDS_ONLY}" == true ]]; then
-          if [[ -n "${AZURE_FEEDS}" ]]; then
-            echo "Azure Artifacts Feeds in this component's package configuration:"
-            cut -f2- <<< "${AZURE_FEEDS}" | tr '\t' ' ' | sed 's/^/  /'
-          else
-            echo "No Azure Artifacts Feed in this component's package configuration."
-          fi
-          exit 0
-        fi
 
         CRED_ENV=()
         if [[ -n "${FEEDS}" ]]; then
@@ -311,7 +280,7 @@ runs:
             if ! command -v az > /dev/null \
                || ! AZ_TOKEN="$(az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv)" \
                || [[ -z "${AZ_TOKEN}" ]]; then
-              echo "::error::$(jq -r '.name' <<< "$C") installs from Azure Artifacts on $(feed_hosts "${AZURE_FEEDS}"), and the Azure CLI has no login. The workflow must log in to Azure before install-toolchain; the ci-workflows reusable workflows do that when the repo variables AZURE_CLIENT_ID and AZURE_TENANT_ID are set."
+              echo "::error::$(jq -r '.name' <<< "$C") installs from Azure Artifacts on $(feed_hosts "${AZURE_FEEDS}"), and the Azure CLI has no login. The workflow must log in to Azure before install-toolchain; the ci-workflows reusable workflows do that when the repo variable AZURE_CLIENT_ID is set (with AZURE_TENANT_ID)."
               exit 1
             fi
             echo "::add-mask::${AZ_TOKEN}"

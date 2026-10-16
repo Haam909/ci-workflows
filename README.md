@@ -360,10 +360,10 @@ files (npmjs.org, Artifactory) get no credential from the workflows.
 
 - **In CI**, `install-toolchain` uses the workflow token for GitHub Packages
   and an Entra token from the Azure CLI for Azure Artifacts. The merge run and
-  the Release build first check each component's package configuration
-  ("Find Azure Artifacts Feeds") and, when it names Azure Artifacts, run
-  "Azure login for package Feeds" (`azure/login`, `allow-no-subscriptions`)
-  before the install. That needs the repo variables `AZURE_CLIENT_ID` and
+  the Release build run "Azure login for package Feeds" (`azure/login`,
+  `allow-no-subscriptions`) before the install whenever the repo variable
+  `AZURE_CLIENT_ID` is set; a repo without it gets no login step. That needs
+  the repo variables `AZURE_CLIENT_ID` and
   `AZURE_TENANT_ID`, federated credentials for the `test` environment and
   for `ref:refs/heads/main` (the Release build runs under no environment),
   and the service principal in the Azure DevOps organization with a role on
