@@ -205,12 +205,68 @@ runs:
           echo "Feed: custom (${FEED})"
         fi
 
+        # A Deploy re-run (Re-run failed jobs, or the same tag dispatched
+        # again) publishes versions already on the Feed. The Feed is
+        # immutable, so on every runtime that is a warning and a skip, not a
+        # failure. Any other publish failure still fails the step.
+        # BEGIN publish-outcome
+        # Prints published, duplicate or failed for a publish's exit code and
+        # captured output. Only an error code or phrase that can mean nothing
+        # but "this version is already there" counts, never a bare HTTP status.
+        publish_outcome() {
+          local runtime="$1" rc="$2" log="$3"
+          case "${runtime}" in
+            dotnet)
+              # --skip-duplicate turns NuGet's 409 into exit 0 and logs it.
+              if (( rc != 0 )); then echo failed
+              elif grep -qiE 'already exists at feed|^[[:space:]]*Conflict https?://' "${log}"; then echo duplicate
+              else echo published; fi ;;
+            python)
+              # --skip-existing exits 0 and logs each file it skipped.
+              if (( rc != 0 )); then echo failed
+              elif grep -qiE 'because it appears to already exist' "${log}"; then echo duplicate
+              else echo published; fi ;;
+            node)
+              # npm has no skip option, so the conflict is a failed publish.
+              # Known signatures (GitHub Packages' exact text is unrecorded):
+              #   npm:             code EPUBLISHCONFLICT, code E409,
+              #                    "cannot publish over the previously published versions"
+              #   GitHub Packages: a 409, or a 403 whose body says
+              #                    "cannot publish over existing version" or
+              #                    that the version already exists
+              if (( rc == 0 )); then echo published
+              elif grep -qiE 'EPUBLISHCONFLICT|\bE409\b|cannot publish over (the )?(previously published|existing) version|version [^[:space:]]+ already exists|version already exists' "${log}"; then echo duplicate
+              else echo failed; fi ;;
+            *) if (( rc == 0 )); then echo published; else echo failed; fi ;;
+          esac
+        }
+        # "<name> <version>" as the Feed knows them, read from the artifact.
+        pkg_id() {
+          local file="$1" runtime="$2" n v
+          case "${runtime}" in
+            dotnet)
+              # The nuspec's own <id> and <version> elements; dependencies
+              # carry theirs as attributes, so they never match.
+              unzip -p "${file}" '*.nuspec' \
+                | sed -n -e 's:.*<id>\(.*\)</id>.*:\1:p' -e 's:.*<version>\(.*\)</version>.*:\1:p' \
+                | head -2 | paste -sd ' ' ;;
+            node)
+              tar -xzOf "${file}" package/package.json | jq -r '"\(.name) \(.version)"' ;;
+            python)
+              # <name>-<version>-<tags>.whl; a wheel name never holds a dash.
+              IFS=- read -r n v _ <<< "$(basename "${file}")"; echo "${n} ${v}" ;;
+          esac
+        }
+        # END publish-outcome
+
+        LOG="${RUNNER_TEMP}/publish.log"
+        RC=0
         case "${RUNTIME}" in
           dotnet)
             dotnet nuget add source "${FEED}" --name target \
               --username ci --password "${TOKEN}" --store-password-in-clear-text
             dotnet nuget push "${ARTIFACT}" --source target \
-              --api-key "${TOKEN}" --skip-duplicate
+              --api-key "${TOKEN}" --skip-duplicate 2>&1 | tee "${LOG}" || RC=$?
             ;;
           node)
             TAG=latest
@@ -218,8 +274,10 @@ runs:
             # npm looks up credentials by the registry URL with a trailing
             # slash, so "//npm.pkg.github.com:_authToken" is never matched.
             REGISTRY="${FEED%/}/"
-            # Written outside the repo so no token lands in the work tree.
+            # Written outside the repo so no token lands in the work tree,
+            # and removed on every exit, failed publish included.
             NPMRC="${RUNNER_TEMP}/publish.npmrc"
+            trap 'rm -f "${NPMRC}"' EXIT
             {
               printf 'registry=%s\n' "${REGISTRY}"
               printf '%s:_authToken=%s\n' "${REGISTRY#https:}" "${TOKEN}"
@@ -228,7 +286,8 @@ runs:
             # A relative "dir/file.tgz" reads to npm as a GitHub owner/repo
             # spec, so always hand it an absolute path.
             npm_config_userconfig="${NPMRC}" \
-              npm publish "$(realpath "${ARTIFACT}")" --tag "${TAG}" --registry "${REGISTRY}"
+              npm publish "$(realpath "${ARTIFACT}")" --tag "${TAG}" --registry "${REGISTRY}" \
+              2>&1 | tee "${LOG}" || RC=$?
             rm -f "${NPMRC}"
             ;;
           python)
@@ -242,6 +301,18 @@ runs:
               echo "::error::No wheel or sdist found in ${DIST}"; exit 1
             fi
             TWINE_USERNAME=ci TWINE_PASSWORD="${TOKEN}" \
-              twine upload --repository-url "${FEED}" --skip-existing "${FILES[@]}"
+              twine upload --repository-url "${FEED}" --skip-existing "${FILES[@]}" \
+              2>&1 | tee "${LOG}" || RC=$?
+            ;;
+        esac
+
+        case "$(publish_outcome "${RUNTIME}" "${RC}" "${LOG}")" in
+          duplicate)
+            ID="$(pkg_id "${ARTIFACT}" "${RUNTIME}")" || ID=""
+            [[ -n "${ID// /}" ]] || ID="$(basename "${ARTIFACT}")"
+            echo "::warning::${ID} is already on ${FEED_HOST}; not published again"
+            ;;
+          failed)
+            exit "${RC}"
             ;;
         esac
