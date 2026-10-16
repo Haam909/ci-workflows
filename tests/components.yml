@@ -1,6 +1,7 @@
 # Self-test manifest: one fixture per runtime and target that builds without
-# Azure. Read by .github/workflows/self-test.yml, which builds each one with
-# the actions in this repo and checks the result against `test:`.
+# Azure (node has two: JavaScript and TypeScript). Read by
+# .github/workflows/self-test.yml, which builds each one with the actions in
+# this repo and checks the result against `test:`.
 #
 #   artifact       glob the build must produce in _artifacts/
 #   entries        paths that must be inside the artifact
@@ -50,6 +51,29 @@ components:
       entries: [package/index.js, package/package.json]
       deps: [ms]
       forbid-deps: [is-number]
+
+  # TypeScript is runtime node: `npm run build` (tsc) compiles src/ to dist/.
+  # typescript and the @types packages are dev dependencies and must not ship.
+  - name: ts-app
+    runtime: node
+    target: app-service
+    path: tests/fixtures/ts-app
+    test:
+      artifact: ts-app-*.zip
+      entries: [dist/server.js, package.json, node_modules/ms/package.json]
+      forbid-entries: [node_modules/typescript/, node_modules/@typescript/, node_modules/@types/]
+      deps: [ms]
+      forbid-deps: [typescript, undici-types]
+
+  - name: ts-pkg
+    runtime: node
+    target: package
+    path: tests/fixtures/ts-pkg
+    test:
+      artifact: haam909-selftest-ts-pkg-*.tgz
+      entries: [package/dist/index.js, package/dist/index.d.ts, package/package.json]
+      deps: [ms]
+      forbid-deps: [typescript]
 
   - name: py-app
     runtime: python
