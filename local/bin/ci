@@ -16,7 +16,8 @@
 # what runs here is what runs there. Commands can be overridden per component
 # with a `commands:` block, and this script honours those too.
 #
-# Needs: bash, yq. Plus the toolchain for whatever your components use.
+# Needs: bash, yq. Plus the toolchain for whatever your components use, and gh
+# logged in with read:packages if a nuget.config or .npmrc names GitHub Packages.
 
 set -uo pipefail
 
@@ -76,6 +77,193 @@ summary_and_exit() {
   fi
 }
 
+# BEGIN feed-credentials
+# The same block is in local/bin/ci and actions/install-toolchain/action.yml;
+# change both. A component installs from whatever Feed the repo's own
+# nuget.config or .npmrc names (ADR 0002). This only works out which of those
+# Feeds need a credential from us, chosen by the Feed's host, and hands it to
+# dotnet and npm through the environment and a user-level npmrc outside the
+# work tree. Every other Feed is left to the repo's own configuration.
+
+# pkg_domain <host>: GitHub Packages for a Host: pkg.github.com on github.com,
+# the Host itself on a <tenant>.ghe.com tenant (nuget.<tenant>.ghe.com,
+# npm.<tenant>.ghe.com). Empty for any other Host.
+pkg_domain() {
+  case "$1" in
+    github.com) echo pkg.github.com ;;
+    *.ghe.com)  echo "$1" ;;
+  esac
+}
+
+# feed_host <url>: the URL's host, lower case, without port.
+feed_host() {
+  local h="${1#*://}"
+  h="${h%%/*}"; h="${h##*@}"; h="${h%%:*}"
+  printf '%s\n' "${h}" | tr '[:upper:]' '[:lower:]'
+}
+
+# feed_kind <url> <pkg domain>: who supplies the Feed's credential. "github"
+# for GitHub Packages on this Host; nothing for any other Feed. Azure Artifacts
+# hosts (#19) get their own kind here.
+feed_kind() {
+  local host
+  host="$(feed_host "$1")"
+  if [[ -n "$2" && ( "${host}" == "nuget.$2" || "${host}" == "npm.$2" ) ]]; then
+    echo github
+  fi
+}
+
+# nuget_sources <dir> <repo root>: "<name><TAB><url>" for each <packageSources>
+# entry in the nuget.config files NuGet reads for a project in <dir>: that
+# folder's and every parent's, up to the repo root.
+nuget_sources() {
+  local d root f
+  root="$(cd "$2" 2> /dev/null && pwd)" || return 0
+  d="$(cd "$1" 2> /dev/null && pwd)" || return 0
+  while :; do
+    for f in "${d}"/[Nn][Uu][Gg][Ee][Tt].[Cc][Oo][Nn][Ff][Ii][Gg]; do
+      if [[ -f "${f}" ]]; then
+        yq -p xml -o tsv '.configuration.packageSources.add | ([] + .)[] | [.["+@key"], .["+@value"]]' "${f}" | tr -d '\r' || true
+      fi
+    done
+    if [[ "${d}" == "${root}" || "${d}" != "${root}"/* ]]; then break; fi
+    d="$(dirname "${d}")"
+  done
+}
+
+# npm_registries <package dir>: each registry URL (registry= and
+# @scope:registry=) in the package's own .npmrc, the project config npm reads.
+npm_registries() {
+  local f="$1/.npmrc"
+  if [[ -f "${f}" ]]; then
+    tr -d '\r' < "${f}" \
+      | sed -n -E 's/^[[:space:]]*(@[^:[:space:]]+:)?registry[[:space:]]*=[[:space:]]*([^[:space:]]+).*$/\2/p'
+  fi
+}
+
+# github_feeds <runtime> <pkg domain> <repo root> <component dir> [project...]
+# One line per GitHub Packages Feed the component's package config names:
+#   nuget<TAB><source name><TAB><url>     npm<TAB><registry url>
+github_feeds() {
+  local runtime="$1" pkg="$2" root="$3" dir="$4" p name url
+  shift 4
+  [[ -n "${pkg}" ]] || return 0
+  case "${runtime}" in
+    dotnet)
+      [[ $# -gt 0 ]] || set -- .
+      for p in "$@"; do nuget_sources "${dir}/$(dirname "${p}")" "${root}"; done \
+        | sort -u | while IFS=$'\t' read -r name url; do
+            if [[ "$(feed_kind "${url}" "${pkg}")" == github ]]; then
+              printf 'nuget\t%s\t%s\n' "${name}" "${url}"
+            fi
+          done ;;
+    node)
+      npm_registries "${dir}" | sort -u | while read -r url; do
+        if [[ "$(feed_kind "${url}" "${pkg}")" == github ]]; then
+          printf 'npm\t%s\n' "${url}"
+        fi
+      done ;;
+  esac
+}
+
+# feed_credentials <token> <user> <npmrc> <feeds>: sets CRED_ENV to the
+# environment that gives <token> to each Feed in <feeds> (github_feeds lines):
+# NuGet's NuGetPackageSourceCredentials_<source name>, and for npm a user
+# config at <npmrc> holding the current user config plus the token.
+feed_credentials() {
+  local token="$1" user="$2" npmrc="$3" kind a b base reg
+  CRED_ENV=()
+  while IFS=$'\t' read -r kind a b; do
+    case "${kind}" in
+      nuget)
+        CRED_ENV+=("NuGetPackageSourceCredentials_${a}=Username=${user};Password=${token}")
+        echo "Feed: GitHub Packages, NuGet source '${a}' (${b})" ;;
+      npm)
+        if [[ ! -s "${npmrc}" ]]; then
+          base="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${HOME}/.npmrc}}"
+          ( umask 077; { if [[ -f "${base}" ]]; then cat "${base}"; echo; fi; echo "# feed credentials"; } > "${npmrc}" )
+          if command -v cygpath > /dev/null; then base="$(cygpath -m "${npmrc}")"; else base="${npmrc}"; fi
+          CRED_ENV+=("npm_config_userconfig=${base}" "NPM_CONFIG_USERCONFIG=${base}")
+        fi
+        # npm keys a token by the registry URL minus its scheme, with a
+        # trailing slash; tarballs are fetched from the host's root.
+        reg="${a#*:}"; reg="${reg%/}/"
+        printf '%s:_authToken=%s\n' "${reg}" "${token}" >> "${npmrc}"
+        if [[ "${reg}" != "//$(feed_host "${a}")/" ]]; then
+          printf '%s:_authToken=%s\n' "//$(feed_host "${a}")/" "${token}" >> "${npmrc}"
+        fi
+        echo "Feed: GitHub Packages, npm registry ${a}" ;;
+    esac
+  done <<< "$4"
+}
+
+# with_feed_credentials <command>: runs the command with CRED_ENV in its
+# environment. A NuGet source name that isn't a shell identifier (a dot, a
+# dash) can only be passed through env(1).
+with_feed_credentials() {
+  local kv
+  local -a odd=()
+  (
+    for kv in ${CRED_ENV[@]+"${CRED_ENV[@]}"}; do
+      if [[ "${kv%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then export "${kv?}"; else odd+=("${kv}"); fi
+    done
+    if [[ ${#odd[@]} -gt 0 ]]; then exec env "${odd[@]}" bash -c "$1"; fi
+    eval "$1"
+  )
+}
+# END feed-credentials
+
+# A component whose nuget.config or .npmrc names GitHub Packages on this repo's
+# Host installs with the token of your gh login on that Host. The Host is read
+# from the origin remote. In GitHub Actions, install-toolchain has already
+# installed with the workflow token, so the restore below finds every package
+# in the local cache and needs none.
+# Relative, so it compares with the component folders whatever the path style.
+REPO_ROOT="$(git rev-parse --show-cdup 2> /dev/null)"; REPO_ROOT="${REPO_ROOT:-.}"
+GH_LOGIN_HOST="$(git remote get-url origin 2> /dev/null || true)"
+GH_LOGIN_HOST="${GH_LOGIN_HOST#*://}"; GH_LOGIN_HOST="${GH_LOGIN_HOST#*@}"; GH_LOGIN_HOST="${GH_LOGIN_HOST%%[:/]*}"
+GH_LOGIN_HOST="$(printf '%s' "${GH_LOGIN_HOST}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${GH_LOGIN_HOST}" == ssh.github.com ]]; then GH_LOGIN_HOST=github.com; fi
+PKG="$(pkg_domain "${GH_LOGIN_HOST}")"
+if [[ "${GITHUB_ACTIONS:-}" == true ]]; then PKG=""; fi
+FEED_TOKEN=""; FEED_USER=""; CRED_FILES=()
+trap 'rm -f ${CRED_FILES[@]+"${CRED_FILES[@]}"}' EXIT
+
+# gh_feed_token <component> <feeds>: the gh token for GitHub Packages on the
+# Host, once per run. Exits when there is no login, or when the login's token
+# can't read packages.
+gh_feed_token() {
+  local feeds resp scopes
+  [[ -n "${FEED_TOKEN}" ]] && return 0
+  feeds="$(cut -f2- <<< "$2" | tr '\t' ' ' | sed 's/^/    /')"
+  if ! command -v gh > /dev/null || ! FEED_TOKEN="$(gh auth token --hostname "${GH_LOGIN_HOST}" 2> /dev/null)" || [[ -z "${FEED_TOKEN}" ]]; then
+    echo "${RED}✗ $1 installs from GitHub Packages on ${GH_LOGIN_HOST}, and gh has no login there.${OFF}" >&2
+    echo "${feeds}" >&2
+    echo "  Log in, then run bin/ci again:" >&2
+    echo "    ${GREY}gh auth login --hostname ${GH_LOGIN_HOST} --scopes read:packages${OFF}" >&2
+    exit 2
+  fi
+  # A classic or OAuth token lists its scopes; gh's default login has no
+  # read:packages, and the registry then refuses the install.
+  resp="$(gh api --hostname "${GH_LOGIN_HOST}" --include user 2> /dev/null | tr -d '\r' || true)"
+  scopes="$(sed -n 's/^[Xx]-[Oo][Aa]uth-[Ss]copes: *//p' <<< "${resp}")"
+  FEED_USER="$(sed -n 's/.*"login":"\([^"]*\)".*/\1/p' <<< "${resp}")"
+  if grep -qi '^x-oauth-scopes:' <<< "${resp}" && ! grep -qE '(^|[ ,])(read|write):packages' <<< "${scopes}"; then
+    echo "${RED}✗ $1 installs from GitHub Packages on ${GH_LOGIN_HOST}, and your gh token can't read packages (scopes: ${scopes}).${OFF}" >&2
+    echo "${feeds}" >&2
+    echo "  Add the scope, then run bin/ci again:" >&2
+    echo "    ${GREY}gh auth refresh --hostname ${GH_LOGIN_HOST} --scopes read:packages${OFF}" >&2
+    exit 2
+  fi
+  FEED_USER="${FEED_USER:-gh}"
+}
+
+# with_creds <command>: the command as step() should run it, with the Feed
+# credentials when this component has any, and unchanged when it has none.
+with_creds() {
+  if [[ ${#CRED_ENV[@]} -gt 0 ]]; then printf 'with_feed_credentials %q' "$1"; else printf '%s' "$1"; fi
+}
+
 if [[ "${QUICK}" == false ]] && grep -q 'integration' "${MANIFEST}"; then
   # Podman serves the same API Testcontainers talks to, so either will do.
   if ! { docker info || podman info; } > /dev/null 2>&1; then
@@ -109,6 +297,22 @@ for (( i=0; i<COUNT; i++ )); do
     done
   fi
 
+  # Credentials for any GitHub Packages Feed the install or the locked restore
+  # reads from. With no such Feed, CRED_ENV stays empty and nothing changes.
+  CRED_ENV=()
+  if [[ "${INSTALL}" == true || -n "${RESTORE}" ]]; then
+    PROJECTS=()
+    for P in "${PROJECT}" "${TESTPROJ}" "${INTEGRATION}"; do
+      if [[ -n "${P}" ]]; then PROJECTS+=("${P}"); fi
+    done
+    FEEDS="$(github_feeds "${RUNTIME}" "${PKG}" "${REPO_ROOT}" "${DIR}" ${PROJECTS[@]+"${PROJECTS[@]}"})"
+    if [[ -n "${FEEDS}" ]]; then
+      gh_feed_token "${NAME}" "${FEEDS}"
+      NPMRC="$(mktemp)"; CRED_FILES+=("${NPMRC}")
+      feed_credentials "${FEED_TOKEN}" "${FEED_USER}" "${NPMRC}" "${FEEDS}"
+    fi
+  fi
+
   if [[ "${INSTALL}" == true ]]; then
     cmd="${C_INSTALL}"
     if [[ -z "$cmd" ]]; then
@@ -120,14 +324,14 @@ for (( i=0; i<COUNT; i++ )); do
         python) cmd="if [ -f requirements.lock.txt ]; then python -m pip install --require-hashes -r requirements.lock.txt; elif [ -f requirements.txt ]; then python -m pip install -r requirements.txt; else python -m pip install -e '.[dev]'; fi" ;;
       esac
     fi
-    step "${NAME}: install" "(cd \"${DIR}\" && ${cmd})"
+    step "${NAME}: install" "(cd \"${DIR}\" && $(with_creds "${cmd}"))"
   fi
 
   # dotnet commands restore first unless told not to, and that restore is
   # unlocked: it rewrites a stale packages.lock.json and passes, where CI's
   # locked restore fails. So restore locked here and keep later steps off it.
   if [[ "${RUNTIME}" == dotnet && "${INSTALL}" == false && -n "${RESTORE}" ]]; then
-    step "${NAME}: restore (locked)" "(cd \"${DIR}\" && ${RESTORE})"
+    step "${NAME}: restore (locked)" "(cd \"${DIR}\" && $(with_creds "${RESTORE}"))"
   fi
 
   if [[ "${QUICK}" == false && "${TESTS_ONLY}" == false ]]; then

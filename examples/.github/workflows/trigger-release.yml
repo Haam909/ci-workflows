@@ -25,6 +25,7 @@ permissions:
   pull-requests: read      # derive-version reads each merged PR's branch
   id-token: write          # keyless signing, attestation, Azure login for containers
   attestations: write
+  packages: read           # install from a GitHub Packages Feed the repo's nuget.config or .npmrc names
 jobs:
   ci:
     uses: Haam909/ci-workflows/.github/workflows/reusable-release.yml@v2

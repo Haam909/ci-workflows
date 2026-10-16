@@ -14,6 +14,11 @@ inputs:
   registry-url:
     description: 'npm registry to configure (package targets only)'
     default: ''
+  token:
+    description: >-
+      Token for a GitHub Packages Feed that the component's nuget.config or
+      .npmrc names. Needs packages: read on the calling workflow.
+    default: ${{ github.token }}
 
 runs:
   using: composite
@@ -47,26 +52,185 @@ runs:
       working-directory: ${{ fromJSON(inputs.component).path || '.' }}
       env:
         C: ${{ inputs.component }}
+        FEED_TOKEN: ${{ inputs.token }}
       run: |
         set -euo pipefail
+
+        # BEGIN feed-credentials
+        # The same block is in local/bin/ci and actions/install-toolchain/action.yml;
+        # change both. A component installs from whatever Feed the repo's own
+        # nuget.config or .npmrc names (ADR 0002). This only works out which of those
+        # Feeds need a credential from us, chosen by the Feed's host, and hands it to
+        # dotnet and npm through the environment and a user-level npmrc outside the
+        # work tree. Every other Feed is left to the repo's own configuration.
+
+        # pkg_domain <host>: GitHub Packages for a Host: pkg.github.com on github.com,
+        # the Host itself on a <tenant>.ghe.com tenant (nuget.<tenant>.ghe.com,
+        # npm.<tenant>.ghe.com). Empty for any other Host.
+        pkg_domain() {
+          case "$1" in
+            github.com) echo pkg.github.com ;;
+            *.ghe.com)  echo "$1" ;;
+          esac
+        }
+
+        # feed_host <url>: the URL's host, lower case, without port.
+        feed_host() {
+          local h="${1#*://}"
+          h="${h%%/*}"; h="${h##*@}"; h="${h%%:*}"
+          printf '%s\n' "${h}" | tr '[:upper:]' '[:lower:]'
+        }
+
+        # feed_kind <url> <pkg domain>: who supplies the Feed's credential. "github"
+        # for GitHub Packages on this Host; nothing for any other Feed. Azure Artifacts
+        # hosts (#19) get their own kind here.
+        feed_kind() {
+          local host
+          host="$(feed_host "$1")"
+          if [[ -n "$2" && ( "${host}" == "nuget.$2" || "${host}" == "npm.$2" ) ]]; then
+            echo github
+          fi
+        }
+
+        # nuget_sources <dir> <repo root>: "<name><TAB><url>" for each <packageSources>
+        # entry in the nuget.config files NuGet reads for a project in <dir>: that
+        # folder's and every parent's, up to the repo root.
+        nuget_sources() {
+          local d root f
+          root="$(cd "$2" 2> /dev/null && pwd)" || return 0
+          d="$(cd "$1" 2> /dev/null && pwd)" || return 0
+          while :; do
+            for f in "${d}"/[Nn][Uu][Gg][Ee][Tt].[Cc][Oo][Nn][Ff][Ii][Gg]; do
+              if [[ -f "${f}" ]]; then
+                yq -p xml -o tsv '.configuration.packageSources.add | ([] + .)[] | [.["+@key"], .["+@value"]]' "${f}" | tr -d '\r' || true
+              fi
+            done
+            if [[ "${d}" == "${root}" || "${d}" != "${root}"/* ]]; then break; fi
+            d="$(dirname "${d}")"
+          done
+        }
+
+        # npm_registries <package dir>: each registry URL (registry= and
+        # @scope:registry=) in the package's own .npmrc, the project config npm reads.
+        npm_registries() {
+          local f="$1/.npmrc"
+          if [[ -f "${f}" ]]; then
+            tr -d '\r' < "${f}" \
+              | sed -n -E 's/^[[:space:]]*(@[^:[:space:]]+:)?registry[[:space:]]*=[[:space:]]*([^[:space:]]+).*$/\2/p'
+          fi
+        }
+
+        # github_feeds <runtime> <pkg domain> <repo root> <component dir> [project...]
+        # One line per GitHub Packages Feed the component's package config names:
+        #   nuget<TAB><source name><TAB><url>     npm<TAB><registry url>
+        github_feeds() {
+          local runtime="$1" pkg="$2" root="$3" dir="$4" p name url
+          shift 4
+          [[ -n "${pkg}" ]] || return 0
+          case "${runtime}" in
+            dotnet)
+              [[ $# -gt 0 ]] || set -- .
+              for p in "$@"; do nuget_sources "${dir}/$(dirname "${p}")" "${root}"; done \
+                | sort -u | while IFS=$'\t' read -r name url; do
+                    if [[ "$(feed_kind "${url}" "${pkg}")" == github ]]; then
+                      printf 'nuget\t%s\t%s\n' "${name}" "${url}"
+                    fi
+                  done ;;
+            node)
+              npm_registries "${dir}" | sort -u | while read -r url; do
+                if [[ "$(feed_kind "${url}" "${pkg}")" == github ]]; then
+                  printf 'npm\t%s\n' "${url}"
+                fi
+              done ;;
+          esac
+        }
+
+        # feed_credentials <token> <user> <npmrc> <feeds>: sets CRED_ENV to the
+        # environment that gives <token> to each Feed in <feeds> (github_feeds lines):
+        # NuGet's NuGetPackageSourceCredentials_<source name>, and for npm a user
+        # config at <npmrc> holding the current user config plus the token.
+        feed_credentials() {
+          local token="$1" user="$2" npmrc="$3" kind a b base reg
+          CRED_ENV=()
+          while IFS=$'\t' read -r kind a b; do
+            case "${kind}" in
+              nuget)
+                CRED_ENV+=("NuGetPackageSourceCredentials_${a}=Username=${user};Password=${token}")
+                echo "Feed: GitHub Packages, NuGet source '${a}' (${b})" ;;
+              npm)
+                if [[ ! -s "${npmrc}" ]]; then
+                  base="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${HOME}/.npmrc}}"
+                  ( umask 077; { if [[ -f "${base}" ]]; then cat "${base}"; echo; fi; echo "# feed credentials"; } > "${npmrc}" )
+                  if command -v cygpath > /dev/null; then base="$(cygpath -m "${npmrc}")"; else base="${npmrc}"; fi
+                  CRED_ENV+=("npm_config_userconfig=${base}" "NPM_CONFIG_USERCONFIG=${base}")
+                fi
+                # npm keys a token by the registry URL minus its scheme, with a
+                # trailing slash; tarballs are fetched from the host's root.
+                reg="${a#*:}"; reg="${reg%/}/"
+                printf '%s:_authToken=%s\n' "${reg}" "${token}" >> "${npmrc}"
+                if [[ "${reg}" != "//$(feed_host "${a}")/" ]]; then
+                  printf '%s:_authToken=%s\n' "//$(feed_host "${a}")/" "${token}" >> "${npmrc}"
+                fi
+                echo "Feed: GitHub Packages, npm registry ${a}" ;;
+            esac
+          done <<< "$4"
+        }
+
+        # with_feed_credentials <command>: runs the command with CRED_ENV in its
+        # environment. A NuGet source name that isn't a shell identifier (a dot, a
+        # dash) can only be passed through env(1).
+        with_feed_credentials() {
+          local kv
+          local -a odd=()
+          (
+            for kv in ${CRED_ENV[@]+"${CRED_ENV[@]}"}; do
+              if [[ "${kv%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then export "${kv?}"; else odd+=("${kv}"); fi
+            done
+            if [[ ${#odd[@]} -gt 0 ]]; then exec env "${odd[@]}" bash -c "$1"; fi
+            eval "$1"
+          )
+        }
+        # END feed-credentials
+
+        # Credentials for a GitHub Packages Feed that the component's nuget.config or
+        # .npmrc names: the workflow token. The Host comes from the runner, as in
+        # deliver-artifact. A component that names no such Feed gets nothing here.
+        RUNTIME="$(jq -r '.runtime' <<< "$C")"
+        HOST="${GITHUB_SERVER_URL#https://}"; HOST="${HOST%/}"
+        PKG=""
+        if [[ "${GITHUB_API_URL%/}" == "https://api.${HOST}" ]]; then PKG="$(pkg_domain "${HOST}")"; fi
+        PROJECTS=()
+        for key in project test-project integration-tests; do
+          P="$(jq -r --arg k "$key" '.[$k] // empty' <<< "$C")"
+          if [[ -n "${P}" ]]; then PROJECTS+=("${P}"); fi
+        done
+        FEEDS="$(github_feeds "${RUNTIME}" "${PKG}" "${GITHUB_WORKSPACE}" . ${PROJECTS[@]+"${PROJECTS[@]}"})"
+        CRED_ENV=()
+        if [[ -n "${FEEDS}" ]]; then
+          # Outside the work tree, and gone when the step ends.
+          NPMRC="${RUNNER_TEMP}/install.npmrc"
+          rm -f "${NPMRC}"; trap 'rm -f "${NPMRC}"' EXIT
+          feed_credentials "${FEED_TOKEN}" "${GITHUB_ACTOR}" "${NPMRC}" "${FEEDS}"
+        fi
+        install_cmd() {
+          if [[ ${#CRED_ENV[@]} -gt 0 ]]; then with_feed_credentials "$1"; else eval "$1"; fi
+        }
+
         OVERRIDE="$(jq -r '.commands.install // empty' <<< "$C")"
         if [[ -n "${OVERRIDE}" ]]; then
-          echo "+ ${OVERRIDE}"; eval "${OVERRIDE}"; exit 0
+          echo "+ ${OVERRIDE}"; install_cmd "${OVERRIDE}"; exit 0
         fi
 
-        case "$(jq -r '.runtime' <<< "$C")" in
+        case "${RUNTIME}" in
           node)
-            npm ci
+            install_cmd "npm ci"
             ;;
           dotnet)
             # Restore every declared project in locked mode, test projects
             # included, so nothing later falls back to an unlocked restore.
             # Requires RestorePackagesWithLockFile + committed packages.lock.json.
-            for key in project test-project integration-tests; do
-              P="$(jq -r --arg k "$key" '.[$k] // empty' <<< "$C")"
-              if [[ -n "${P}" ]]; then
-                dotnet restore "${P}" --locked-mode
-              fi
+            for P in ${PROJECTS[@]+"${PROJECTS[@]}"}; do
+              install_cmd "dotnet restore $(printf '%q' "${P}") --locked-mode"
             done
             ;;
           python)
