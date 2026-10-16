@@ -292,8 +292,9 @@ credentials from "Onboarding a repo", because the token comes from
 `azure/login`. It needs `AZURE_SUBSCRIPTION_ID` only if a component also
 deploys to Azure.
 
-Publishing a dotnet and a node package to an org-scoped Feed has been run
-end to end. Python packages and project-scoped Feeds haven't.
+Publishing has been run end to end for dotnet and node to GitHub Packages and
+for all three runtimes to an org-scoped and a project-scoped Azure Artifacts
+Feed, including a Deploy re-run of the same tag on all three (RideAlong 20).
 
 **Other feeds** (npmjs.org, PyPI, Artifactory, Nexus) can't use OIDC, so put
 the token in a repository secret and name it on the component:
