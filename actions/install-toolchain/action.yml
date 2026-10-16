@@ -207,10 +207,17 @@ runs:
         FEEDS="$(github_feeds "${RUNTIME}" "${PKG}" "${GITHUB_WORKSPACE}" . ${PROJECTS[@]+"${PROJECTS[@]}"})"
         CRED_ENV=()
         if [[ -n "${FEEDS}" ]]; then
-          # Outside the work tree, and gone when the step ends.
+          # Outside the work tree; the runner empties RUNNER_TEMP when the job
+          # ends. npm's user config stays for the rest of the job, because
+          # build-artifact installs a service's production dependencies again
+          # (npm ci --omit=dev in its staging folder). Later dotnet steps run
+          # with --no-restore and need no credential.
           NPMRC="${RUNNER_TEMP}/install.npmrc"
-          rm -f "${NPMRC}"; trap 'rm -f "${NPMRC}"' EXIT
+          rm -f "${NPMRC}"
           feed_credentials "${FEED_TOKEN}" "${GITHUB_ACTOR}" "${NPMRC}" "${FEEDS}"
+          if [[ -s "${NPMRC}" ]]; then
+            echo "npm_config_userconfig=${NPMRC}" >> "${GITHUB_ENV}"
+          fi
         fi
         install_cmd() {
           if [[ ${#CRED_ENV[@]} -gt 0 ]]; then with_feed_credentials "$1"; else eval "$1"; fi
