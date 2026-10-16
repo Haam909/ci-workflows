@@ -362,7 +362,9 @@ files (npmjs.org, Artifactory) get no credential from the workflows.
   and an Entra token from the Azure CLI for Azure Artifacts. The merge run and
   the Release build run "Azure login for package Feeds" (`azure/login`,
   `allow-no-subscriptions`) before the install whenever the repo variable
-  `AZURE_CLIENT_ID` is set; a repo without it gets no login step. That needs
+  `AZURE_CLIENT_ID` is set; a repo without it gets no login step, and a
+  failed login (`continue-on-error`) only fails the components that install
+  from an Azure Feed, in the install step. That needs
   the repo variables `AZURE_CLIENT_ID` and
   `AZURE_TENANT_ID`, federated credentials for the `test` environment and
   for `ref:refs/heads/main` (the Release build runs under no environment),
