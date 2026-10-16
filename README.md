@@ -190,7 +190,8 @@ against the released commit (`<component> v<version>`, then `success` or
 
 Shipping an older release than the latest is allowed, with a warning. A
 failed component is re-run with **Re-run failed jobs**, or the whole thing
-is dispatched again with the same tag.
+is dispatched again with the same tag. A version already on the Feed is
+reported as a warning and skipped, on every runtime.
 
 **Checking a release's provenance.** The attestation is signed by this repo's
 release workflow, not by the consuming repo, so name both:
