@@ -131,7 +131,8 @@ checkout breaks them under Git Bash. A `.gitattributes` line does it:
 in your setup script. Hooks are never installed by cloning — that would be a
 remote code execution hole, and git won't do it.
 
-Requirements: `bash`, `yq`, `gh` (authenticated with `gh auth login`), Docker
+Requirements: `bash`, `yq`, `gh` (authenticated with `gh auth login`, with
+`--scopes read:packages` if a `nuget.config` or `.npmrc` names GitHub Packages), Docker
 or Podman running if the manifest mentions integration tests (see README.md), plus
 whatever toolchains the repo's components use. On Windows the hook runs under
 Git Bash, which ships with Git for Windows, and `yq` installs with

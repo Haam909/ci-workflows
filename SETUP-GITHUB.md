@@ -426,6 +426,27 @@ settings page is `https://github.com/users/YOURNAME/packages/npm/PACKAGE/setting
 with `nuget` in place of `npm` for a NuGet package. The repo that first
 published the package starts with **Admin**.
 
+**Installing a package from GitHub Packages.** If a component depends on one
+of your own packages there, the repo says where it lives, the same file you'd
+need on your laptop anyway:
+
+- C#: a `nuget.config` at the repo root listing both `nuget.org` and
+  `https://nuget.pkg.github.com/YOURNAME/index.json` under `<packageSources>`.
+- Node: an `.npmrc` next to `package.json` with
+  `@yourname:registry=https://npm.pkg.github.com/`.
+
+No token goes in either file. CI uses the workflow token; `trigger-release.yml`
+must have `packages: read` in its `permissions:` block (copy it from
+`examples/`), or the release build fails with `403 (Forbidden)`. On your
+machine `bin/ci` uses your `gh` login, which needs the `read:packages` scope:
+
+```bash
+gh auth login --hostname github.com --scopes read:packages
+```
+
+If the package is private, also give the installing repo **Read** under the
+package's **Manage Actions access**.
+
 ---
 
 ## Troubleshooting

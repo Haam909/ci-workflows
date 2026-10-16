@@ -319,6 +319,46 @@ The repo needs **Write** on the package under the package's **Manage Actions
 access** settings; with Read, the publish fails with
 `403 … permission_denied: write_package`.
 
+### Installing from a Feed
+
+A component can depend on a package on GitHub Packages on the repo's Host.
+Name the Feed where the package tool already looks (ADR 0002); there is no
+manifest key:
+
+- **dotnet** — a `nuget.config` in the project's folder or a parent up to the
+  repo root, with a `<packageSources>` entry for
+  `https://nuget.pkg.github.com/OWNER/index.json`. Keep `nuget.org` in it if
+  anything else comes from there. The source's name must not contain spaces.
+- **node** — an `.npmrc` beside the component's `package.json` (npm reads no
+  other project file), with `@OWNER:registry=https://npm.pkg.github.com/`.
+
+Commit no token in either. The install picks the entries out by host and
+supplies the credential: `install-toolchain` passes the workflow token
+(NuGet's `NuGetPackageSourceCredentials_<source name>`, and a user-level
+npmrc under `RUNNER_TEMP` for npm); `bin/ci --install`, and the locked restore
+a plain `bin/ci` runs, pass the token of your `gh` login on the Host. Without
+that login, or if its token lacks `read:packages`, `bin/ci` stops and prints
+the command:
+
+```bash
+gh auth login --hostname github.com --scopes read:packages
+```
+
+Other feeds in those files (Azure Artifacts, npmjs.org, Artifactory) get no
+credential from the workflows. A repo whose files name no GitHub Packages
+Feed installs exactly as before and needs no `gh` login for it.
+
+The Release trigger needs `packages: read` (in `examples/` since `47b7bfd`).
+Without any `packages` permission the Release build's restore fails with
+`error NU1301: … 403 (Forbidden)`. The merge trigger's `packages: write`
+already covers it.
+
+A package owned by the same account, public, published by another repo,
+installed in testing with no **Manage Actions access** entry for the
+installing repo (RideAlong 21). GitHub documents that the `GITHUB_TOKEN`
+"can be used if the repository is granted read access to the package"; for a
+private package, add the installing repo there with **Read**.
+
 ## Integration tests
 
 Testcontainers, not service containers. `services:` must be declared in
