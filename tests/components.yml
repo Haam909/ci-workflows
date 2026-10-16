@@ -54,6 +54,8 @@ components:
 
   # TypeScript is runtime node: `npm run build` (tsc) compiles src/ to dist/.
   # typescript and the @types packages are dev dependencies and must not ship.
+  # npm 10 leaves the omitted packages' scope folders behind empty
+  # (node_modules/@types/), so forbid the packages, not their scopes.
   - name: ts-app
     runtime: node
     target: app-service
@@ -61,7 +63,7 @@ components:
     test:
       artifact: ts-app-*.zip
       entries: [dist/server.js, package.json, node_modules/ms/package.json]
-      forbid-entries: [node_modules/typescript/, node_modules/@typescript/, node_modules/@types/]
+      forbid-entries: [node_modules/typescript/, node_modules/@typescript/typescript-, node_modules/@types/ms/, node_modules/@types/node/]
       deps: [ms]
       forbid-deps: [typescript, undici-types]
 
