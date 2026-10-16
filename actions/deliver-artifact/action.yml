@@ -309,12 +309,16 @@ runs:
             pip install --quiet twine
             shopt -s nullglob
             DIST="$(dirname "${ARTIFACT}")"
-            # Only the wheel and sdist — the release folder also holds SBOMs
-            # and signature bundles, which twine would reject.
-            FILES=( "${DIST}"/*.whl "${DIST}"/*.tar.gz )
+            # Only this component's wheel and sdist. The folder also holds
+            # SBOMs and signature bundles, which twine would reject, and at
+            # Deploy every other component's release assets too. Both files
+            # start with the wheel's "<name>-<version>" (PEP 427 / PEP 625).
+            IFS=- read -r PY_NAME PY_VERSION _ <<< "$(basename "${ARTIFACT}")"
+            FILES=( "${DIST}/${PY_NAME}-${PY_VERSION}"-*.whl "${DIST}/${PY_NAME}-${PY_VERSION}".tar.gz )
             if (( ${#FILES[@]} == 0 )); then
-              echo "::error::No wheel or sdist found in ${DIST}"; exit 1
+              echo "::error::No wheel or sdist named ${PY_NAME}-${PY_VERSION}* in ${DIST}"; exit 1
             fi
+            echo "Publishing: ${FILES[*]##*/}"
             TWINE_USERNAME=ci TWINE_PASSWORD="${TOKEN}" \
               twine upload --repository-url "${FEED}" "${FILES[@]}" \
               2>&1 | tee "${LOG}" || RC=$?
