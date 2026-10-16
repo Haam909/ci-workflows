@@ -233,8 +233,14 @@ runs:
               # twine uploads the wheel and the sdist together, so a partial
               # duplicate (one file new, one already there) is reported as a
               # duplicate; that is the known limit.
+              # twine wraps its messages at 80 columns, splitting a phrase
+              # over lines ("already contains file" / "'<file>' in package"),
+              # so the output is matched with all whitespace collapsed. A
+              # here-string, not a pipe: grep -q closing early under pipefail
+              # would turn a match into a failure.
               if (( rc == 0 )); then echo published
-              elif grep -qiE 'already contains file .* in package|file already exists|(file|version) [^[:space:]]+ already exists|version already exists|because it appears to already exist' "${log}"; then echo duplicate
+              elif grep -qiE 'already contains file .* in package|file already exists|(file|version) [^[:space:]]+ already exists|version already exists|because it appears to already exist' \
+                     <<< "$(tr -s '[:space:]' ' ' < "${log}")"; then echo duplicate
               else echo failed; fi ;;
             node)
               # npm has no skip option, so the conflict is a failed publish.
