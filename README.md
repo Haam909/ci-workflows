@@ -221,16 +221,20 @@ Without `--signer-repo` it fails with `verifying with issuer "sigstore.dev"`.
 5. Tag the starting version (`v0.1.0`) **before** the merge trigger reaches
    `main`; until a tag exists every merge builds `0.1.0-alpha.0`.
 6. Lock files (below).
-7. Only if a component deploys to Azure or publishes to Azure Artifacts:
-   repo variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+7. Only if a component deploys to Azure, or publishes to or installs from
+   Azure Artifacts: repo variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
    `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, plus `ACR_NAME` for
    `container`; and federated credentials for
    `repo:ORG/REPO:environment:{test,production}`, plus
    `repo:ORG/REPO:ref:refs/heads/main` for the container push at release,
-   which runs under no environment. A repo whose only
-   Azure use is publishing to Azure Artifacts needs just `AZURE_CLIENT_ID`,
-   `AZURE_TENANT_ID` and the credentials: a package's `azure/login` asks for
-   no subscription.
+   which runs under no environment, and for the Release build of a component
+   that installs from Azure Artifacts. A repo whose only Azure use is
+   publishing to or installing from Azure Artifacts needs just
+   `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and the credentials: those logins ask
+   for no subscription. Read the subject prefix from
+   `gh api repos/ORG/REPO/actions/oidc/customization/sub`: newer repos carry
+   owner and repo IDs in it (`repo:ORG@OWNER_ID/REPO@REPO_ID`), so the plain
+   `repo:ORG/REPO` form does not match them.
 
 A repo whose components are all `package` on GitHub Packages needs no Azure
 configuration at all — `azure/login` is skipped.
@@ -321,43 +325,82 @@ access** settings; with Read, the publish fails with
 
 ### Installing from a Feed
 
-A component can depend on a package on GitHub Packages on the repo's Host.
-Name the Feed where the package tool already looks (ADR 0002); there is no
-manifest key:
+A component can depend on a package on GitHub Packages on the repo's Host or
+on an Azure Artifacts Feed. Name the Feed where the package tool already
+looks (ADR 0002); there is no manifest key:
 
 - **dotnet** — a `nuget.config` in the project's folder or a parent up to the
   repo root, with a `<packageSources>` entry for
-  `https://nuget.pkg.github.com/OWNER/index.json`. Keep `nuget.org` in it if
-  anything else comes from there. The source's name must not contain spaces.
-- **node** — an `.npmrc` beside the component's `package.json` (npm reads no
-  other project file), with `@OWNER:registry=https://npm.pkg.github.com/`.
+  `https://nuget.pkg.github.com/OWNER/index.json` or
+  `https://pkgs.dev.azure.com/ORG[/PROJECT]/_packaging/FEED/nuget/v3/index.json`.
+  NuGet merges every one of those files, so a component can add a Feed in its
+  own folder on top of the root's sources. Keep `nuget.org` if anything else
+  comes from there. NuGet asks every source for every package, so the Feed
+  is asked about nuget.org's packages too. The source's name must not
+  contain spaces.
+- **node** — an `.npmrc` beside the component's `package.json`, with
+  `@OWNER:registry=https://npm.pkg.github.com/` or
+  `@SCOPE:registry=https://pkgs.dev.azure.com/ORG[/PROJECT]/_packaging/FEED/npm/registry/`.
+  npm reads no other project file: an `.npmrc` at the repo root is not read
+  for a component in a subfolder, and the workflows don't read it either.
+- **python** — an `--index-url`, `-i` or `--extra-index-url` line with
+  `https://pkgs.dev.azure.com/ORG[/PROJECT]/_packaging/FEED/pypi/simple/` in
+  the component's `requirements*.txt`. pip reads no config file from the work
+  tree, so a `pip.conf` in the repo names nothing. GitHub Packages has no
+  Python registry. Without `requirements.lock.txt` the install warns that it
+  is not hash-pinned. With `--extra-index-url` pip looks in PyPI and the Feed
+  alike for every requirement, so pin the version.
 
-Commit no token in either. The install picks the entries out by host and
-supplies the credential: `install-toolchain` passes the workflow token
-(NuGet's `NuGetPackageSourceCredentials_<source name>`, and a user-level
-npmrc under `RUNNER_TEMP` for npm); `bin/ci --install`, and the locked restore
-a plain `bin/ci` runs, pass the token of your `gh` login on the Host. Without
-that login, or if its token lacks `read:packages`, `bin/ci` stops and prints
-the command:
+Commit no token in any of them. The install picks the entries out by host
+(GitHub Packages on the repo's Host; `pkgs.dev.azure.com` or
+`*.visualstudio.com` for Azure Artifacts) and supplies the credential, outside
+the work tree: NuGet's `NuGetPackageSourceCredentials_<source name>`, a
+user-level npmrc for npm, and a netrc for pip (`NETRC`). Other feeds in those
+files (npmjs.org, Artifactory) get no credential from the workflows.
 
-```bash
-gh auth login --hostname github.com --scopes read:packages
-```
+- **In CI**, `install-toolchain` uses the workflow token for GitHub Packages
+  and an Entra token from the Azure CLI for Azure Artifacts. The merge run and
+  the Release build first check each component's package configuration
+  ("Find Azure Artifacts Feeds") and, when it names Azure Artifacts, run
+  "Azure login for package Feeds" (`azure/login`, `allow-no-subscriptions`)
+  before the install. That needs the repo variables `AZURE_CLIENT_ID` and
+  `AZURE_TENANT_ID`, federated credentials for the `test` environment and
+  for `ref:refs/heads/main` (the Release build runs under no environment),
+  and the service principal in the Azure DevOps organization with a role on
+  the Feed (onboarding step 7). Microsoft's Feed Reader role covers
+  "Download/install/restore packages"; saving a package from an upstream
+  source takes Feed and Upstream Reader (Collaborator). Tested only with
+  Feed Publisher (Contributor).
+  The Azure targets' and the container push's own logins are unchanged.
+- **On a laptop**, `bin/ci --install`, and the locked restore a plain `bin/ci`
+  runs, use the token of your `gh` login on the Host and of your `az` login.
+  Without the login a Feed needs, or if the `gh` token lacks
+  `read:packages`, `bin/ci` stops and prints the command:
 
-Other feeds in those files (Azure Artifacts, npmjs.org, Artifactory) get no
-credential from the workflows. A repo whose files name no GitHub Packages
-Feed installs exactly as before and needs no `gh` login for it.
+  ```bash
+  gh auth login --hostname github.com --scopes read:packages
+  az login --allow-no-subscriptions
+  ```
 
-The Release trigger needs `packages: read` (in `examples/` since `47b7bfd`).
-Without any `packages` permission the Release build's restore fails with
-`error NU1301: … 403 (Forbidden)`. The merge trigger's `packages: write`
-already covers it.
+A repo whose files name neither kind of Feed installs exactly as before:
+`bin/ci` calls neither `gh` nor `az`, and the merge run and Release build skip
+the Azure login.
 
-A package owned by the same account, public, published by another repo,
-installed in testing with no **Manage Actions access** entry for the
-installing repo (RideAlong 21). GitHub documents that the `GITHUB_TOKEN`
-"can be used if the repository is granted read access to the package"; for a
-private package, add the installing repo there with **Read**.
+The Release trigger needs `packages: read` (in `examples/` since `47b7bfd`)
+for GitHub Packages. Without any `packages` permission the Release build's
+restore fails with `error NU1301: … 403 (Forbidden)`. The merge trigger's
+`packages: write` already covers it. Both triggers already grant
+`id-token: write` for the Azure login.
+
+Installing has been run for dotnet and node from GitHub Packages (RideAlong
+21) and for dotnet, node and python from an org-scoped Azure Artifacts Feed
+(RideAlong 22), in the merge run, the Release build and `bin/ci --install`
+on a laptop; the pre-push hook's locked restore ran for the dotnet
+components. A GitHub Packages package owned by the same account, public, installed with no
+**Manage Actions access** entry for the installing repo. GitHub documents that
+the `GITHUB_TOKEN` "can be used if the repository is granted read access to
+the package"; for a private package, add the installing repo there with
+**Read**.
 
 ## Integration tests
 

@@ -447,6 +447,30 @@ gh auth login --hostname github.com --scopes read:packages
 If the package is private, also give the installing repo **Read** under the
 package's **Manage Actions access**.
 
+**Installing a package from Azure Artifacts.** The same idea, with the Feed's
+URLs:
+
+- C#: a `nuget.config` (the root one, or one in the project's folder that
+  adds to it) with `https://pkgs.dev.azure.com/ORG/_packaging/FEED/nuget/v3/index.json`.
+- Node: an `.npmrc` next to `package.json` with
+  `@yourscope:registry=https://pkgs.dev.azure.com/ORG/_packaging/FEED/npm/registry/`.
+- Python: `--extra-index-url https://pkgs.dev.azure.com/ORG/_packaging/FEED/pypi/simple/`
+  at the top of the component's `requirements.txt`.
+
+(A project-scoped Feed has `ORG/PROJECT/_packaging/...`.) No token goes in any
+of them. In CI the merge run and the Release build log in to Azure before
+installing, so the repo needs the variables `AZURE_CLIENT_ID` and
+`AZURE_TENANT_ID` and federated credentials for the `test` environment and
+for `main` (README.md "Onboarding a repo", step 7), and the app
+registration's service principal needs a role on the Feed: **Feed and
+Upstream Reader (Collaborator)** if the Feed has upstream sources (README.md
+"Installing from a Feed"). On your machine `bin/ci` uses your Azure CLI
+login:
+
+```bash
+az login --allow-no-subscriptions
+```
+
 ---
 
 ## Troubleshooting
