@@ -222,20 +222,29 @@ runs:
               elif grep -qiE 'already exists at feed|^[[:space:]]*Conflict https?://' "${log}"; then echo duplicate
               else echo published; fi ;;
             python)
-              # --skip-existing exits 0 and logs each file it skipped.
-              if (( rc != 0 )); then echo failed
-              elif grep -qiE 'because it appears to already exist' "${log}"; then echo duplicate
-              else echo published; fi ;;
+              # No --skip-existing: Azure Artifacts refuses the flag before
+              # uploading ("does not have support for the following features:
+              # --skip-existing"), so the conflict is a failed upload, as on npm.
+              # Known signatures:
+              #   PyPI (warehouse): 400 "File already exists"
+              #   Azure Artifacts:  phrasing for PyPI unrecorded; its npm text is
+              #                     "already contains file ... in package"
+              #   twine:            "... already exists" naming a file or version
+              # twine uploads the wheel and the sdist together, so a partial
+              # duplicate (one file new, one already there) is reported as a
+              # duplicate; that is the known limit.
+              if (( rc == 0 )); then echo published
+              elif grep -qiE 'already contains file .* in package|file already exists|(file|version) [^[:space:]]+ already exists|version already exists|because it appears to already exist' "${log}"; then echo duplicate
+              else echo failed; fi ;;
             node)
               # npm has no skip option, so the conflict is a failed publish.
-              # Known signatures (GitHub Packages' exact text is unrecorded):
+              # Known signatures:
               #   npm:             code EPUBLISHCONFLICT, code E409,
               #                    "cannot publish over the previously published versions"
-              #   GitHub Packages: a 409, or a 403 whose body says
-              #                    "cannot publish over existing version" or
-              #                    that the version already exists
+              #   GitHub Packages: code E409 + "Cannot publish over existing version"
+              #   Azure Artifacts: code E403 + "already contains file ... in package"
               if (( rc == 0 )); then echo published
-              elif grep -qiE 'EPUBLISHCONFLICT|\bE409\b|cannot publish over (the )?(previously published|existing) version|version [^[:space:]]+ already exists|version already exists' "${log}"; then echo duplicate
+              elif grep -qiE 'EPUBLISHCONFLICT|\bE409\b|cannot publish over (the )?(previously published|existing) version|version [^[:space:]]+ already exists|version already exists|already contains file .* in package' "${log}"; then echo duplicate
               else echo failed; fi ;;
             *) if (( rc == 0 )); then echo published; else echo failed; fi ;;
           esac
@@ -301,7 +310,7 @@ runs:
               echo "::error::No wheel or sdist found in ${DIST}"; exit 1
             fi
             TWINE_USERNAME=ci TWINE_PASSWORD="${TOKEN}" \
-              twine upload --repository-url "${FEED}" --skip-existing "${FILES[@]}" \
+              twine upload --repository-url "${FEED}" "${FILES[@]}" \
               2>&1 | tee "${LOG}" || RC=$?
             ;;
         esac
