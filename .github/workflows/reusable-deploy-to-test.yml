@@ -71,6 +71,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Whether this component's nuget.config, .npmrc or requirements files
+      # name an Azure Artifacts Feed to install from. Installs nothing.
+      - id: feeds
+        name: Find Azure Artifacts Feeds
+        uses: Haam909/ci-workflows/actions/install-toolchain@v2
+        with:
+          component: ${{ toJSON(matrix.component) }}
+          feeds-only: 'true'
+
+      # Installing from Azure Artifacts takes an Entra token, so log in before
+      # the install. That needs no subscription. A separate step from the
+      # login below: GitHub's OIDC token is short-lived, so the deploy and
+      # publish log in again after the tests rather than reuse this one.
+      - name: Azure login for package Feeds
+        if: steps.feeds.outputs.azure-artifacts == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
       - uses: Haam909/ci-workflows/actions/install-toolchain@v2
         with:
           component: ${{ toJSON(matrix.component) }}
