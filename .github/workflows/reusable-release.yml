@@ -179,9 +179,6 @@ jobs:
       # container login below, which needs the subscription for ACR.
       - name: Azure login for package Feeds
         if: vars.AZURE_CLIENT_ID != ''
-        # A failed login must not fail components that install from no Azure
-        # Feed; install-toolchain errors itself for the ones that do.
-        continue-on-error: true
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
