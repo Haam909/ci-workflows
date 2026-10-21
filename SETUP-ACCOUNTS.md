@@ -377,18 +377,29 @@ app `haamtestingapp`.
    default branch**, and fill in the rules as SETUP-GITHUB.md 8b. Untick
    **Restrict deletions**; leave **Block force pushes**. No repo in the
    organization has run the checks yet, so the search doesn't list them:
-   type `ci / gate`, `ci / branch-name` and `local/ci` by hand. A typed check
-   has no source, and "Any person or integration with write permissions to a
-   repository can set the state of any status check". Tick **Do not require
-   status checks on creation**: without it a new repo's first push to `main`
-   is refused ("3 of 3 required status checks are expected"), and
-   `gh repo create --add-readme` leaves the repo empty. This prints
+   type `ci / gate`, `ci / branch-name` and `local/ci` by hand. Tick **Do
+   not require status checks on creation**: without it a new repo's first
+   push to `main` is refused ("3 of 3 required status checks are expected"),
+   and `gh repo create --add-readme` leaves the repo empty. This prints
    `["non_fast_forward","pull_request","required_status_checks","required_linear_history"]`
    and then `true`:
 
    ```bash
    gh api orgs/<org>/rulesets/<id> --jq '[.rules[].type]'
    gh api orgs/<org>/rulesets/<id> --jq '.rules[] | select(.type=="required_status_checks") | .parameters.do_not_enforce_on_create'
+   ```
+
+   A typed check has no source, and "Any person or integration with write
+   permissions to a repository can set the state of any status check", so
+   a fake `ci / gate` would pass. The search still didn't list the checks
+   after a PR in the organization had run them, so pin `ci / gate` and
+   `ci / branch-name` to GitHub Actions (app ID 15368) through the API.
+   `local/ci` keeps no source, since people post it. The second command
+   prints the two checks with `"integration_id":15368`:
+
+   ```bash
+   gh api orgs/<org>/rulesets/<id> --jq '{rules: [.rules[] | if .type=="required_status_checks" then .parameters.required_status_checks |= map(if .context=="local/ci" then . else . + {integration_id: 15368} end) else . end]}' > rules.json
+   gh api -X PUT orgs/<org>/rulesets/<id> --input rules.json --jq '.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks'
    ```
 
    [Creating rulesets for repositories in your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization),
