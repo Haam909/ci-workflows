@@ -379,11 +379,16 @@ app `haamtestingapp`.
    organization has run the checks yet, so the search doesn't list them:
    type `ci / gate`, `ci / branch-name` and `local/ci` by hand. A typed check
    has no source, and "Any person or integration with write permissions to a
-   repository can set the state of any status check". This prints
-   `["non_fast_forward","pull_request","required_status_checks","required_linear_history"]`:
+   repository can set the state of any status check". Tick **Do not require
+   status checks on creation**: without it a new repo's first push to `main`
+   is refused ("3 of 3 required status checks are expected"), and
+   `gh repo create --add-readme` leaves the repo empty. This prints
+   `["non_fast_forward","pull_request","required_status_checks","required_linear_history"]`
+   and then `true`:
 
    ```bash
    gh api orgs/<org>/rulesets/<id> --jq '[.rules[].type]'
+   gh api orgs/<org>/rulesets/<id> --jq '.rules[] | select(.type=="required_status_checks") | .parameters.do_not_enforce_on_create'
    ```
 
    [Creating rulesets for repositories in your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization),
