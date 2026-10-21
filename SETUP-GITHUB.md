@@ -538,6 +538,12 @@ read without it; a private or internal repo's can't, and the version bump
 comes from the merged PRs' branches. Add it to the trigger's `permissions:`
 block, as in `examples/`.
 
+**"Resource not accessible by integration" in Release's "Find the commit to release"**
+The trigger doesn't grant `deployments: read`. A public repo's deployments
+can be read without it; a private or internal repo's can't, and with **sha**
+blank Release looks for the newest test deployment. Add it to the trigger's
+`permissions:` block, as in `examples/`.
+
 **"No successful deployment to test found"**
 You ran Release with **sha** blank before ever merging to main. Merge
 something first, or pass the commit you want in **sha**.
