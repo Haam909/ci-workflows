@@ -320,7 +320,9 @@ its feed. npm packages on GitHub Packages must be scoped to the org
 new personal-account packages as private by default. Making a package public
 can't be undone. Check the package's visibility after its first publish, and
 publish from a private repo (or a private feed) if the package must not be
-public.
+public. From a private and from an internal repo in a GitHub Enterprise Cloud
+organization, the NuGet package came out **private**, the internal repo's too
+(#6 story 26); npm wasn't tried there.
 
 The repo needs **Write** on the package under the package's **Manage Actions
 access** settings; with Read, the publish fails with
@@ -454,9 +456,11 @@ laptop. GitHub Actions itself can't be a bypass actor, on a personal account
 or in an organization ("must be part of the ruleset source or owner
 organization"), so the release takes a token from the app when
 `RELEASE_APP_CLIENT_ID` is set (SETUP-GITHUB.md 8c). On a free **personal**
-account Evaluate mode is refused too ("upgrade to Enterprise"). The app bypass
-is untested. Without a bypass, an active rule blocks the release's own tag
-push.
+account Evaluate mode is refused too ("upgrade to Enterprise"). In a GitHub
+Enterprise Cloud organization, a `v0.1.0` pushed from a laptop was refused
+("Cannot create ref due to creations being restricted.") and the release's own
+push went through on the app's bypass (#6 story 23). Without a bypass, an
+active rule blocks the release's own tag push.
 
 ## Versioning this repo
 
@@ -508,5 +512,7 @@ name when moving it (SETUP-GITHUB.md step 2).
   the run was dispatched from. Any environment rule on `production` still
   applies to the job.
 - Version derivation reads PR branch names via `commits/{sha}/pulls`. It
-  worked on a public repo without `pull-requests: read`; private repos are
-  untested. A failure there is silent: every commit falls back to patch.
+  worked on a public repo without `pull-requests: read`, and on a private and
+  an internal repo with it: a `feature/` PR took each from `v0.1.0` to
+  `v0.2.0` (#6 story 26). A failure there is silent: every commit falls back
+  to patch.

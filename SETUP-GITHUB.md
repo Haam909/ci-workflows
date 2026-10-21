@@ -299,6 +299,12 @@ git push origin v0.1.0
 Do this before step 8 — once `main` is protected, it can only change through a
 pull request.
 
+**In an organization whose rulesets already apply** (SETUP-ACCOUNTS.md, GitHub
+Enterprise Cloud trial steps 6 to 9), skip the tag: the `v*` ruleset refuses
+it ("Cannot create ref due to creations being restricted."), and the `main`
+ruleset requires a pull request. Add the triggers in the first pull request instead;
+with no tag, the first release is `0.1.0`.
+
 ## Step 8 — Rulesets
 
 Repo **Settings → Rules → Rulesets → New ruleset**. You'll make three.
@@ -392,7 +398,9 @@ organization"). A GitHub App owned by the organization can:
    Selected**.
 
 With `RELEASE_APP_CLIENT_ID` set, the release pushes its tag with a token from
-the app; without it, with `GITHUB_TOKEN`. The app bypass is untested.
+the app; without it, with `GITHUB_TOKEN`. Tested in a GitHub Enterprise Cloud
+organization: a laptop's tag push was refused, and the release's went through
+on the bypass (#6 story 23).
 
 **On a personal account, skip 8c.** The Actions bypass is refused, and the
 Evaluate fallback needs Enterprise ("Enforcement evaluate option is not
@@ -443,6 +451,8 @@ public repo, both the npm and the NuGet package came out **public**, and that
 can't be reversed. Deleting the package doesn't stop it either: the next merge
 to `main` publishes a new prerelease and recreates it.
 If it must stay private, publish from a private repo or to a private feed.
+From a private and from an internal repo in a GitHub Enterprise Cloud
+organization, the NuGet package came out **private** (#6 story 26).
 
 The repo needs **Write** (or **Admin**) on the package: package page →
 **Package settings** → **Manage Actions access**. On a personal account the
