@@ -258,8 +258,136 @@ recreated, because GitHub's subject now carries the repo's ID.
 
 ## GitHub Enterprise Cloud trial
 
-Not written yet: Haam909/ci-workflows#26. It will cover starting the trial,
-the organization and team, and the org rulesets.
+The Enterprise Plan proofs need an organization on GitHub Enterprise Cloud:
+org rulesets, a team as required reviewer, a `v*` tag ruleset with a bypass,
+internal repos and attestations on private repos. A trial gives one with no
+payment method. "The trial lasts for 30 days", with up to 50 licenses and
+3,000 minutes of standard GitHub-hosted runners. Run on 2026-10-21 as
+enterprise `haamtesting`, organization `HaamTesting`, team `HaamTesting` and
+app `haamtestingapp`.
+
+1. Start the trial. Signed in as the account that will own the enterprise,
+   select **Set up a trial of GitHub Enterprise Cloud** on the trial page and
+   choose an enterprise with **personal accounts**, not managed users; the
+   managed-users trial is the GHE.com section below. Only managed users are
+   asked where to host it ("If you choose an enterprise with managed users,
+   you'll also choose whether to create your trial on GitHub.com or
+   GHE.com"). The enterprise lives at `https://github.com/enterprises/<slug>`.
+   [Setting up a trial of GitHub Enterprise Cloud](https://docs.github.com/en/enterprise-cloud@latest/admin/overview/setting-up-a-trial-of-github-enterprise-cloud),
+   [Choosing an enterprise type](https://docs.github.com/en/enterprise-cloud@latest/admin/concepts/enterprise-fundamentals/choose-an-enterprise-type)
+
+2. Create the organization. On the enterprise's page, select
+   **Organizations** > **New organization**, name it, select **Create
+   organization**, leave **Invite owners** empty and select **Finish**. Pick
+   a name you'll keep: "Organizations created during the trial cannot be
+   removed from the enterprise account until you purchase GitHub
+   Enterprise." Check it's on the Plan; `HaamTesting` prints `enterprise 50`:
+
+   ```bash
+   gh api orgs/<org> --jq '"\(.plan.name) \(.plan.seats)"'
+   ```
+
+   [Adding organizations to your enterprise](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-accounts-and-repositories/managing-organizations-in-your-enterprise/adding-organizations-to-your-enterprise),
+   [Setting up a trial of GitHub Enterprise Cloud](https://docs.github.com/en/enterprise-cloud@latest/admin/overview/setting-up-a-trial-of-github-enterprise-cloud)
+
+3. Create the team. In the organization, select **Teams** > **New team**,
+   name it, leave **Parent team** empty and select **Create team**. Its
+   creator is its maintainer; this prints `maintainer`:
+
+   ```bash
+   gh api orgs/<org>/teams/<team-slug>/memberships/<you> --jq .role
+   ```
+
+   [Creating a team](https://docs.github.com/en/enterprise-cloud@latest/organizations/organizing-members-into-teams/creating-a-team)
+
+4. Add a second person to the team, so that a Deploy can be approved by a
+   team member who didn't start it. Select **People** > **Invite member**,
+   enter their username, choose **Member**, select the team and select
+   **Send invitation**. They accept from the email within seven days, and
+   "Users that you invite must enable two-factor authentication before
+   accepting the invitation." Not run yet.
+   [Inviting users to join your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-membership-in-your-organization/inviting-users-to-join-your-organization)
+
+5. Let `gh` read the organization's rulesets. Without `admin:org`, `gh api
+   orgs/<org>/rulesets` answers 'This API operation needs the "admin:org"
+   scope', and that scope is "Fully manage the organization and its teams,
+   projects, and memberships":
+
+   ```bash
+   gh auth refresh -h github.com -s admin:org
+   ```
+
+   [Scopes for OAuth apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps)
+
+6. The "branch naming" ruleset. In the organization, select **Settings** >
+   **Repository** > **Rulesets** > **New ruleset** > **New branch ruleset**
+   and fill it in as SETUP-GITHUB.md 8a, with **Target repositories** set to
+   **All repositories**. A new ruleset starts with **Restrict deletions** and
+   **Block force pushes** ticked ("This rule is selected by default"); untick
+   both, so **Restrict creations** is the only rule. The second command
+   prints `16 ["creation"]`:
+
+   ```bash
+   gh api orgs/<org>/rulesets --jq '.[] | "\(.id) \(.name)"'
+   gh api orgs/<org>/rulesets/<id> --jq '"\(.conditions.ref_name.exclude | length) \([.rules[].type])"'
+   ```
+
+   [Creating rulesets for repositories in your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization),
+   [Available rules for rulesets](https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
+
+7. The GitHub App the release pushes its tag as. GitHub Actions can't be a
+   ruleset's bypass actor in an organization either ("Actor GitHub Actions
+   integration must be part of the ruleset source or owner organization"),
+   so do SETUP-GITHUB.md 8c steps 1 to 4 in this organization. **Install
+   App** is in the app's own settings: **Developer settings** > **GitHub
+   Apps** > **Edit** next to the app. Give the variable and the secret
+   **All repositories** access, since the proof repos are public. The checks
+   print `haamtestingapp all {"contents":"write","metadata":"read"}`, then
+   `RELEASE_APP_CLIENT_ID all` and `RELEASE_APP_PRIVATE_KEY all`:
+
+   ```bash
+   gh api orgs/<org>/installations --jq '.installations[] | "\(.app_slug) \(.repository_selection) \(.permissions)"'
+   gh api orgs/<org>/actions/variables --jq '.variables[] | "\(.name) \(.visibility)"'
+   gh api orgs/<org>/actions/secrets --jq '.secrets[] | "\(.name) \(.visibility)"'
+   ```
+
+   [Registering a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app),
+   [Installing your own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app),
+   [Making authenticated API requests with a GitHub App in a GitHub Actions workflow](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/making-authenticated-api-requests-with-a-github-app-in-a-github-actions-workflow)
+
+8. The "release tags" ruleset. Select **New ruleset** > **New tag ruleset**,
+   name it `release tags`, set it **Active**, target **All repositories**,
+   add **Include by pattern** `v*`, and leave **Restrict creations** as the
+   only rule. Under **Bypass list** select **Add bypass**, pick the app and
+   select **Add Selected**. Here the saved ruleset still had no bypass actor,
+   so read it back, and if it prints `[]`, add the app through the API with
+   the ID that `gh api apps/<app-slug> --jq .id` prints:
+
+   ```bash
+   gh api orgs/<org>/rulesets/<id> --jq .bypass_actors
+   echo '{"bypass_actors":[{"actor_id":<app-id>,"actor_type":"Integration","bypass_mode":"always"}]}' | gh api -X PUT orgs/<org>/rulesets/<id> --input -
+   ```
+
+   Read back, it prints the app's ID with `"bypass_mode":"always"`.
+   [Creating rulesets for repositories in your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization),
+   [Update an organization repository ruleset](https://docs.github.com/en/enterprise-cloud@latest/rest/orgs/rules?apiVersion=2022-11-28#update-an-organization-repository-ruleset)
+
+9. The "main" ruleset. Select **New ruleset** > **New branch ruleset**, name
+   it `main`, set it **Active**, target **All repositories** and **Include
+   default branch**, and fill in the rules as SETUP-GITHUB.md 8b. Untick
+   **Restrict deletions**; leave **Block force pushes**. No repo in the
+   organization has run the checks yet, so the search doesn't list them:
+   type `ci / gate`, `ci / branch-name` and `local/ci` by hand. A typed check
+   has no source, and "Any person or integration with write permissions to a
+   repository can set the state of any status check". This prints
+   `["non_fast_forward","pull_request","required_status_checks","required_linear_history"]`:
+
+   ```bash
+   gh api orgs/<org>/rulesets/<id> --jq '[.rules[].type]'
+   ```
+
+   [Creating rulesets for repositories in your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization),
+   [Available rules for rulesets](https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
 
 ## GHE.com trial with managed users and Entra ID
 
