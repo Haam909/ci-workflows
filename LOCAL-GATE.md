@@ -201,6 +201,12 @@ have failed with "1 of 2 required 'local/ci' signoffs" on the author's push;
 re-run it after signing off: **Re-run failed jobs** on the run, or
 `gh run rerun <run-id> --failed`.
 
+A reviewer who signs off with a token, not a `gh auth login`, needs a classic
+token with the `repo:status` scope: a repository collaborator can't use a
+fine-grained one. This has been run with a second account: the author signing
+off twice still gave "1 of 2", and the second account's signoff passed the gate
+(RideAlong 25).
+
 ## Branch protection
 
 Add `local/ci` as a required status check on main, alongside `ci / gate` and
