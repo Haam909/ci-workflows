@@ -304,10 +304,25 @@ jobs:
       TARGET_SHA: ${{ needs.resolve.outputs.sha }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      # A `v*` tag ruleset can't list GitHub Actions as a bypass actor: GitHub
+      # refuses it with "must be part of the ruleset source or owner
+      # organization". A repo with that ruleset pushes the tag as a GitHub App
+      # on the bypass list instead, its client ID in RELEASE_APP_CLIENT_ID and
+      # its private key in RELEASE_APP_PRIVATE_KEY. Without them, GITHUB_TOKEN.
+      - name: Token for the tag push
+        id: tag-token
+        if: vars.RELEASE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.sha }}
           fetch-depth: 0
+          token: ${{ steps.tag-token.outputs.token || secrets.GITHUB_TOKEN }}
 
       - uses: actions/download-artifact@v4
         with:

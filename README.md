@@ -448,12 +448,15 @@ no per-component PR checks. The PR checks run on `pull_request` only: a push
 trigger as well would report each check twice per commit, and its skipped
 `branch-name` job counts as passed for a required check.
 
-**On tags.** Target `v*`, **Restrict creations**, bypass only for the Actions
-app. Stops anyone tagging a release from a laptop. On a free **personal**
-account the Actions bypass is refused ("must be part of the ruleset source or
-owner organization") and so is Evaluate mode ("upgrade to Enterprise"), so
-this rule needs org-owned repos; that setup is untested. Without the bypass,
-an active rule blocks the release's own tag push.
+**On tags.** Target `v*`, **Restrict creations**, bypass only for a GitHub
+App that the release pushes its tag as. Stops anyone tagging a release from a
+laptop. GitHub Actions itself can't be a bypass actor, on a personal account
+or in an organization ("must be part of the ruleset source or owner
+organization"), so the release takes a token from the app when
+`RELEASE_APP_CLIENT_ID` is set (SETUP-GITHUB.md 8c). On a free **personal**
+account Evaluate mode is refused too ("upgrade to Enterprise"). The app bypass
+is untested. Without a bypass, an active rule blocks the release's own tag
+push.
 
 ## Versioning this repo
 

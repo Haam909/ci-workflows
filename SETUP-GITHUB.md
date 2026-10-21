@@ -321,7 +321,8 @@ number goes up. A branch called `my-changes` tells the system nothing.
   and the PR gate read too. Each pattern is its own target. Pasted as one
   comma-separated list, it becomes a single pattern that matches no branch,
   and every new branch is refused.
-- Under Rules, tick **Restrict creations**
+- Under Rules, tick **Restrict creations**. Untick **Restrict deletions** and
+  **Block force pushes**, which a new ruleset starts with.
 
 Check it — the second command should print 16:
 
@@ -362,17 +363,40 @@ Tags are the version history. Only the release workflow should create them.
 
 - New **tag** ruleset, "release tags"
 - Target tags → **Include by pattern** → `v*`
-- Tick **Restrict creations**
+- Tick **Restrict creations**. Untick **Restrict deletions** and **Block force
+  pushes**, which a new ruleset starts with.
 
-The release workflow pushes tags using `GITHUB_TOKEN`, and rulesets apply to
-that too, so add **GitHub Actions** to the ruleset's **Bypass list** — without
-it every release fails at `git push origin vX.Y.Z`.
+The release workflow pushes the tag, and rulesets apply to it too, so the
+ruleset needs a bypass for whatever pushes it — without one every release
+fails at `git push origin vX.Y.Z`. GitHub Actions can't be that bypass: GitHub
+refuses it on a personal account and in an organization alike ("Actor GitHub
+Actions integration must be part of the ruleset source or owner
+organization"). A GitHub App owned by the organization can:
 
-**On a personal account, skip 8c.** GitHub refuses the Actions bypass there
-("Actor GitHub Actions integration must be part of the ruleset source or owner
-organization"), and the Evaluate fallback needs Enterprise ("Enforcement
-evaluate option is not supported on this plan"). The rule needs repos owned by
-an organization.
+1. Organization **Settings → Developer settings → GitHub Apps → New GitHub
+   App**. Any name; the organization's URL as **Homepage URL**; clear
+   **Active** under Webhook; under Repository permissions set **Contents** to
+   **Read & write**; **Only on this account**; **Create GitHub App**.
+   ([Registering a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app))
+2. On the app's page, copy the **Client ID**, then generate a private key. A
+   `.pem` file downloads.
+   ([Managing private keys](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps))
+3. **Install App** → **Install** next to the organization → **All
+   repositories**, or only the ones that release → **Install**.
+   ([Installing your own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app))
+4. Organization **Settings → Secrets and variables → Actions**: a variable
+   `RELEASE_APP_CLIENT_ID` holding the Client ID, and a secret
+   `RELEASE_APP_PRIVATE_KEY` holding the whole `.pem` file.
+   ([Making authenticated API requests with a GitHub App in a GitHub Actions workflow](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/making-authenticated-api-requests-with-a-github-app-in-a-github-actions-workflow))
+5. In the ruleset, **Bypass list → Add bypass**, pick the app, **Add
+   Selected**.
+
+With `RELEASE_APP_CLIENT_ID` set, the release pushes its tag with a token from
+the app; without it, with `GITHUB_TOKEN`. The app bypass is untested.
+
+**On a personal account, skip 8c.** The Actions bypass is refused, and the
+Evaluate fallback needs Enterprise ("Enforcement evaluate option is not
+supported on this plan").
 
 ## Step 9 — Your first release
 
