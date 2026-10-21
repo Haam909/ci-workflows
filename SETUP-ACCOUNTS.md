@@ -405,6 +405,57 @@ app `haamtestingapp`.
    [Creating rulesets for repositories in your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization),
    [Available rules for rulesets](https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
 
+10. The organization's own copy of ci-workflows. The triggers pass secrets
+    with `secrets: inherit`, and only "Workflows that call reusable
+    workflows in the same organization or enterprise can use the `inherit`
+    keyword". Called from `Haam909/ci-workflows`, the release's **Token for
+    the tag push** step failed with "The 'private-key' input must be set to
+    a non-empty string". Moving `v2` on `Haam909` doesn't move the copy's.
+
+    First take `ci-workflows` out of the "release tags" and "main"
+    rulesets: "release tags" refuses the `v2` push, and "main" requires
+    `ci / gate` and `ci / branch-name`, which only a consuming repo's
+    `reusable-verify-pull-request.yml` run posts. The UI's **Exclude by
+    pattern** is under **Repositories matching a name**, not **All
+    repositories**, so use the API. Run it for
+    both rulesets' IDs; each prints
+    `{"exclude":["ci-workflows"],"include":["~ALL"]}`:
+
+    ```bash
+    gh api orgs/<org>/rulesets/<id> --jq '{conditions: (.conditions | .repository_name.exclude = ["ci-workflows"])}' | gh api -X PUT orgs/<org>/rulesets/<id> --input - --jq .conditions.repository_name
+    ```
+
+    Then do SETUP-GITHUB.md Steps 1 to 3 with `<org>` for `YOURNAME`. On
+    Windows, `git add` records every file without its executable bit, so
+    before the commit run:
+
+    ```bash
+    git update-index --chmod=+x local/bin/ci local/bin/signoff local/githooks/pre-push
+    ```
+
+    Turn off `mirror-images` in the copy. It copies images to
+    `ghcr.io/haam909`, which the organization can't write to ("denied:
+    permission_denied: The requested installation does not exist."), and
+    the copy's `self-test` reads them from there. The checks print `100755`
+    three times, the same commit for `main` and `v2^{}`, and
+    `disabled_manually`:
+
+    ```bash
+    gh workflow disable mirror-images -R <org>/ci-workflows
+    git ls-files -s local/bin/ci local/bin/signoff local/githooks/pre-push
+    git ls-remote origin main 'v2^{}'
+    gh workflow list -R <org>/ci-workflows --all --json name,state --jq '.[] | select(.name=="mirror-images") | .state'
+    ```
+
+    A consuming repo in the organization then follows SETUP-GITHUB.md Step
+    4 onwards; triggers copied from the copy already call
+    `<org>/ci-workflows`.
+    [Reuse workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows),
+    [Creating rulesets for repositories in your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization),
+    [Update an organization repository ruleset](https://docs.github.com/en/enterprise-cloud@latest/rest/orgs/rules?apiVersion=2022-11-28#update-an-organization-repository-ruleset),
+    [git update-index](https://git-scm.com/docs/git-update-index),
+    [Disabling and enabling a workflow](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows)
+
 ## GHE.com trial with managed users and Entra ID
 
 Not written yet: Haam909/ci-workflows#30. It will cover starting the trial,
