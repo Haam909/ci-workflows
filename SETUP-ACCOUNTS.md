@@ -305,7 +305,10 @@ app `haamtestingapp`.
    enter their username, choose **Member**, select the team and select
    **Send invitation**. They accept from the email within seven days, and
    "Users that you invite must enable two-factor authentication before
-   accepting the invitation." Not run yet.
+   accepting the invitation." Not run: the two accounts created for this
+   were suspended by GitHub before either could accept (the second,
+   `astrongarms6677`, at its first sign-in after the invitation on
+   2026-10-22), and #6 story 22 is parked. Invite an established account.
    [Inviting users to join your organization](https://docs.github.com/en/enterprise-cloud@latest/organizations/managing-membership-in-your-organization/inviting-users-to-join-your-organization)
 
 5. Let `gh` read the organization's rulesets. Without `admin:org`, `gh api
