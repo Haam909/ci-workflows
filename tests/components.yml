@@ -137,3 +137,15 @@ components:
     test:
       image: localhost:5000/py-container
       deps: [tomli-w]
+
+  # No `path`, as for any dotnet component, so the image is built from the
+  # repo root; /.dockerignore keeps that to the fixture.
+  - name: dotnet-container
+    runtime: dotnet
+    target: container
+    project: tests/fixtures/dotnet-container/DotnetContainer.csproj
+    dockerfile: tests/fixtures/dotnet-container/Dockerfile
+    dotnet-version: '10.0.x'
+    test:
+      image: localhost:5000/dotnet-container
+      deps: [newtonsoft.json]

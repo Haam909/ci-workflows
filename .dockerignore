@@ -1,0 +1,7 @@
+# Only the dotnet-container fixture is built from the repo root (a dotnet
+# component has no `path`); send it what its Dockerfile copies.
+*
+!tests/fixtures/Directory.Build.props
+!tests/fixtures/dotnet-container/
+tests/fixtures/dotnet-container/bin/
+tests/fixtures/dotnet-container/obj/

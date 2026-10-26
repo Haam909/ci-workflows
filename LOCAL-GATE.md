@@ -80,8 +80,9 @@ catch a real defect — deferring them to a server after the merge defeats the
 point of gating. Testcontainers drives the local Docker daemon, so `bin/ci`
 refuses to run rather than silently skipping them when Docker is down.
 A `container` component's image is built the same way, from its
-`dockerfile` with its `path` as the context, so a broken Dockerfile fails
-the push rather than the merge run; nothing is pushed.
+`dockerfile` with its `path` (the repo root without one) as the context, so
+a broken Dockerfile fails the push rather than the merge run; nothing is
+pushed.
 
 Podman works too. On Windows, the Podman machine serves the Docker API on
 `\\.\pipe\docker_engine`, which is where Testcontainers looks by default, so

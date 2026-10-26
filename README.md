@@ -75,7 +75,13 @@ github.com, the merge run and the Release push the image to
 `ghcr.io/<owner>/<repo>/<component>` with the workflow token, signed by
 digest at release, and nothing is deployed; it needs no Azure configuration
 either. The Release trigger needs `packages: write` for that push
-(`examples/` grants it).
+(`examples/` grants it). A dotnet component has no `path`, so its image is
+built from the repo root; a root `.dockerignore` keeps that context to what
+the Dockerfile copies.
+
+That route, with no Azure, has been run on github.com for a Python and a .NET
+container and for TypeScript, Python and .NET apps at `none`: pre-push hook,
+pull request, merge run, Release and Deploy (RideAlong 30, 31).
 
 Adding a runtime touches `install-toolchain`, `build-artifact` and `bin/ci`.
 Adding a target touches `deliver-artifact`. Nothing else.
@@ -475,9 +481,11 @@ active rule blocks the release's own tag push.
 Change this repo through a pull request. `self-test.yml` builds each fixture
 in `tests/components.yml` with the actions from that branch (not `@v2`) and
 checks the artifact's name and contents and the SBOM's root version and
-component list. It covers every runtime with the `app-service` and `package`
-targets, and needs no consumer repo, release or Azure. Move `v2` only after it
-passes on `main`. Container builds aren't covered: they need a registry.
+component list. It covers every runtime with the `app-service`, `function` and
+`package` targets, and a Python and a .NET `container`, and needs no consumer
+repo, release or Azure: the container fixtures push to a registry service
+container on `localhost:5000`. Move `v2` only after it passes on `main`. The
+push to ghcr.io (a container without `ACR_NAME`) isn't covered there.
 
 Consumers pin `@v2`. Move `v2` forward for compatible changes; cut `v3` for
 anything needing manifest changes — thirty repos means a breaking change here
