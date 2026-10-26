@@ -459,8 +459,147 @@ app `haamtestingapp`.
     [git update-index](https://git-scm.com/docs/git-update-index),
     [Disabling and enabling a workflow](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows)
 
-## GHE.com trial with managed users and Entra ID
+## A GHE.com tenant
 
-Not written yet: Haam909/ci-workflows#30. It will cover starting the trial,
-provisioning a test user, and a federated credential for the tenant's own
-OIDC issuer on its own app registration.
+An enterprise on GHE.com, at `<tenant>.ghe.com`, with no Azure: apps at
+`none`, packages on the tenant's GitHub Packages, and containers in the
+tenant's Container registry. **None of this section has been run on a
+tenant yet.** Each step says what to check, and steps 5 and 6 say what the
+first runs show. Starting a trial tenant with managed users and Entra ID is
+Haam909/ci-workflows#30, not written yet.
+
+What's different from github.com:
+
+- There are no public repos: "Notably, these include gists and public
+  repositories." So the tenant's copy of ci-workflows is internal or
+  private, and a calling repo's `GITHUB_TOKEN` can't check it out. The
+  release's GitHub App does that instead (steps 2 and 4).
+- "A `GITHUB_TOKEN` within a workflow run for your enterprise on GHE.com
+  does not grant access to resources on GitHub.com", so the tenant's repos
+  call a copy inside the tenant, not `Haam909/ci-workflows`
+  (`docs/adr/0001-copy-per-ghe-tenant.md`).
+- "The Container registry is located at
+  `https://containers.SUBDOMAIN.ghe.com`." A `container` with no `ACR_NAME`
+  pushes to `containers.<tenant>.ghe.com/<org>/<repo>/<component>`.
+- GitHub Packages is at `nuget.<tenant>.ghe.com` and `npm.<tenant>.ghe.com`;
+  the workflows and `bin/ci` work that out from the repo's Host (README.md,
+  Package feeds).
+- Every repo is private or internal, so the release writes no cosign
+  bundles (the **Sign** step runs for public repos only) and relies on
+  GitHub's attestation, which hasn't been tried on a tenant. A container
+  image gets neither: the attestation step skips containers. Released images
+  on a tenant are pushed by digest but not signed.
+
+[Feature overview for GitHub Enterprise Cloud with data residency](https://docs.github.com/en/enterprise-cloud@latest/admin/data-residency/feature-overview-for-github-enterprise-cloud-with-data-residency),
+[Working with the Container registry](https://docs.github.com/en/enterprise-cloud@latest/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
+
+1. Sign `gh` in to the tenant, and point this shell's `gh` at it. Add
+   `--scopes read:packages` if a component installs from the tenant's GitHub
+   Packages. `bin/ci` and `bin/signoff` take the Host from the clone's
+   `origin`, so every developer and reviewer needs the login but not
+   `GH_HOST`.
+
+   ```bash
+   gh auth login --hostname <tenant>.ghe.com
+   export GH_HOST=<tenant>.ghe.com
+   ```
+
+   [gh auth login](https://cli.github.com/manual/gh_auth_login),
+   [gh environment](https://cli.github.com/manual/gh_help_environment)
+
+2. The organization's rulesets and the release's GitHub App. Do the GitHub
+   Enterprise Cloud trial steps 5 to 9 above in the tenant's organization,
+   with `-h <tenant>.ghe.com` in step 5's `gh auth refresh`. Two
+   differences:
+
+   - Install the app from step 7 on **All repositories**, or on
+     `ci-workflows` as well as the repos that release: the workflows read
+     the copy with it (step 4). Give the variable and the secret access to
+     every repo; on a tenant none of them is public:
+
+     ```bash
+     gh variable set RELEASE_APP_CLIENT_ID --org <org> --visibility all --body <client-id>
+     gh secret set RELEASE_APP_PRIVATE_KEY --org <org> --visibility all < <app>.pem
+     ```
+
+   - Step 9 pins `ci / gate` and `ci / branch-name` to app ID 15368, which is
+     GitHub Actions on github.com. Read the tenant's from a check run once a
+     PR has run them, and use that ID instead:
+
+     ```bash
+     gh api repos/<org>/<repo>/commits/<sha>/check-runs --jq '.check_runs[] | "\(.name) \(.app.id)"'
+     ```
+
+   [gh variable set](https://cli.github.com/manual/gh_variable_set),
+   [gh secret set](https://cli.github.com/manual/gh_secret_set),
+   [List check runs for a Git reference](https://docs.github.com/en/enterprise-cloud@latest/rest/checks/runs#list-check-runs-for-a-git-reference)
+
+3. The organization's copy of ci-workflows. Do GitHub Enterprise Cloud trial
+   step 10 above, with these differences:
+
+   - Create the repo **internal**, not public as SETUP-GITHUB.md step 1
+     says. A private copy's workflows "can be shared with other private
+     repositories" only, so an internal Consuming repo couldn't call it.
+   - Its remote is `https://<tenant>.ghe.com/<org>/ci-workflows.git`.
+
+   The check prints `internal`:
+
+   ```bash
+   gh api repos/<org>/ci-workflows --jq .visibility
+   ```
+
+   [Creating a new repository](https://docs.github.com/en/enterprise-cloud@latest/repositories/creating-and-managing-repositories/creating-a-new-repository)
+
+4. Let the organization's repos use the copy. A Consuming repo calls the
+   copy's reusable workflows, which GitHub allows once the copy's **Access**
+   setting does. In the copy, go to **Settings** > **Actions** > **General**,
+   under **Access** choose **Accessible from repositories in the '<org>'
+   organization**, and select **Save**. The workflows then check out the
+   copy's actions with a token from the release's app (step 2), whenever
+   `RELEASE_APP_CLIENT_ID` is visible to the calling repo. The check prints
+   `organization`:
+
+   ```bash
+   gh api repos/<org>/ci-workflows/actions/permissions/access --jq .access_level
+   ```
+
+   [Managing GitHub Actions settings for a repository: allowing access to components in an internal repository](https://docs.github.com/en/enterprise-cloud@latest/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository#allowing-access-to-components-in-an-internal-repository),
+   [Get the level of access for workflows outside of the repository](https://docs.github.com/en/enterprise-cloud@latest/rest/actions/permissions#get-the-level-of-access-for-workflows-outside-of-the-repository)
+
+5. Read the copy's own `self-test`. The push in step 3 starts it, and its
+   `merge`, `release` and `pull-request` jobs run the reusable workflows over
+   `tests/workflows.yml`. That's the first run on the tenant, before any
+   Consuming repo exists. It reads the copy with the copy's own
+   `GITHUB_TOKEN`, so step 4's token isn't tried until step 6. In its log:
+
+   - Every `.ci-workflows` checkout shows `repository: <org>/ci-workflows`
+     and `ref:` with a 40-character SHA. An empty `ref:` means the tenant has
+     no `job.workflow_sha`; GitHub documents it as missing only on GitHub
+     Enterprise Server.
+   - `merge / py-container -> test` pushes to
+     `containers.<tenant>.ghe.com/<org>/ci-workflows/py-container`.
+   - `release / build ts-app` and the other non-container builds either
+     attest or warn "no attestation".
+   - The `build` job's two container fixtures use a registry image from
+     `ghcr.io/haam909`. Whether a tenant's runner can pull it is untested;
+     if they fail there, the rest of the run still answers the above.
+
+   [Contexts reference: job context](https://docs.github.com/en/enterprise-cloud@latest/actions/reference/workflows-and-actions/contexts#job-context)
+
+6. The first Consuming repo. Follow SETUP-GITHUB.md Step 4 onwards, copying
+   `examples/.github/` from the copy so the triggers call `<org>/ci-workflows`.
+   Skip step 7's tag while the "release tags" ruleset applies, as step 7
+   says. On its first pull request:
+
+   - The `branch-name` job's **Token for the ci-workflows checkout** step
+     succeeds, and the checkout after it shows `repository:
+     <org>/ci-workflows`. If the step was skipped, the repo can't see
+     `RELEASE_APP_CLIENT_ID`; if it failed, the app isn't installed on the
+     copy or the key is wrong. Either way the checkout then fails, because
+     `GITHUB_TOKEN` can't read the copy.
+   - A `local/ci` status from the author's push appears on the PR, posted by
+     `bin/signoff` to the tenant.
+
+   Then the merge run pushes any container to
+   `containers.<tenant>.ghe.com/<org>/<repo>/<component>`, and the Release's
+   notes say what wasn't signed.

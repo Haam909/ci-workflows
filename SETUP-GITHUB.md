@@ -29,7 +29,7 @@ calls. That's what this project is. Instead of 30 copies of the same 300
 lines, each repo has an 8-line file that says "run the shared one".
 
 **Composite action** — several steps bundled together so they can be called
-as one. The four folders under `actions/` are these.
+as one. The folders under `actions/` are these.
 
 **Runner** — the throwaway VM. `ubuntu-latest` is GitHub's, free for public
 repos, with a monthly allowance for private ones.
@@ -61,8 +61,10 @@ your-app repo                      ci-workflows repo
                                      └─ uses ─► actions/install-toolchain
                                                 actions/run-tests
                                                 actions/build-artifact
+                                                actions/generate-sbom
                                                 actions/deliver-artifact
                                                 actions/derive-version
+                                                actions/check-branch-name
 ```
 
 The `trigger-*` files say **when**. The `reusable-*` files say **what**.
@@ -77,6 +79,9 @@ On GitHub, create a new repository called `ci-workflows`.
 **Make it public.** Not because the code is special, but because the shared
 workflows check out their own actions with the calling repo's `GITHUB_TOKEN`,
 and that token can read no other private repo. There are no secrets in it.
+Where it can't be public (an organization that forbids public repos, or a
+GHE.com tenant, which has none), make it internal and let the release's
+GitHub App read it: SETUP-ACCOUNTS.md, "A GHE.com tenant", steps 2 to 4.
 
 Unzip this project into it and push:
 
@@ -183,6 +188,19 @@ components:
   A project targeting `net10.0` needs `dotnet-version: '10.0.x'`.
 - `path` — for node and python, the folder containing `package.json` or
   `requirements.txt`. Leave it out if that's the repo root.
+- `dockerfile` — for `target: container`, the Dockerfile's path from the
+  repo root. The image is built with `path` as its context, or the repo root
+  without one, as for a dotnet component.
+
+A `container` with no `ACR_NAME` variable on the repo deploys nowhere: the
+merge run and the Release push its image to the Host's Container registry,
+`ghcr.io/<owner>/<repo>/<name>` on github.com, and Deploy leaves it there.
+An image built from the repo root needs a root `.dockerignore` that starts
+with `*` and lets back in only what the Dockerfile copies. Without one the
+context includes `.ci-workflows`, where the workflows check out their
+actions. Pushed from a public repo, the images came out public. The Release
+signs a public repo's image with cosign; README.md, "Checking a release's
+provenance", has the command to check it.
 
 Delete the example's comment block as well. `bin/ci` searches the whole file
 for the word `integration`, comments included, and refuses to run without
@@ -512,6 +530,15 @@ az login --allow-no-subscriptions
 **"unable to resolve action … repository not found"**
 The `v2` tag doesn't exist in `ci-workflows`, or the org name wasn't replaced,
 or the repo is private and hasn't granted access. Check step 2 and step 3.
+
+**The checkout into `.ci-workflows` fails**
+The workflows check out ci-workflows' actions with the calling repo's
+`GITHUB_TOKEN`, which can't read a copy that isn't public. Make the copy
+public, or have the release's GitHub App read it (SETUP-ACCOUNTS.md, "A
+GHE.com tenant", steps 2 to 4). With the app, the step before the checkout,
+**Token for the ci-workflows checkout**, says which: skipped means the
+calling repo can't see `RELEASE_APP_CLIENT_ID`; failed means the app isn't
+installed on the copy, or `RELEASE_APP_PRIVATE_KEY` isn't its key.
 
 **"workflow was not found"**
 Same causes. Also check the filename in the `uses:` line matches exactly —

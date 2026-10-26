@@ -20,7 +20,7 @@ actions/
     prefixes                   the branch prefixes and their bumps; the one list
   check-branch-name/           PR gate: the branch has a prefix from that list
 SETUP-GITHUB.md                step-by-step setup, no prior CI experience assumed
-SETUP-ACCOUNTS.md              Azure DevOps, Azure Artifacts, Entra; the enterprise trials
+SETUP-ACCOUNTS.md              Azure DevOps, Azure Artifacts, Entra; the enterprise trials; a GHE.com tenant
 LOCAL-GATE.md                  pre-push hook, local unit tests, signoff
 tests/                         self-test manifest and fixture projects
 local/                         bin/ci, bin/signoff, pre-push hook to copy into a repo
@@ -70,11 +70,13 @@ deliver nothing. It needs no Azure configuration. Use it for the versioning
 and release flow on its own.
 
 `container` pushes its image to ACR when the repo sets `ACR_NAME`, and the
-merge and Deploy point a Container App at it. Without `ACR_NAME`, on
-github.com, the merge run and the Release push the image to
-`ghcr.io/<owner>/<repo>/<component>` with the workflow token, signed by
-digest at release, and nothing is deployed; it needs no Azure configuration
-either. The Release trigger needs `packages: write` for that push
+merge and Deploy point a Container App at it. Without `ACR_NAME`, the merge
+run and the Release push the image to the Host's Container registry with the
+workflow token, and nothing is deployed; it needs no Azure configuration
+either. That's `ghcr.io/<owner>/<repo>/<component>` on github.com and
+`containers.<tenant>.ghe.com/<owner>/<repo>/<component>` on a GHE.com tenant
+(not yet run there). A public repo's released image is signed by digest; a
+private or internal repo's isn't (What a release does). The Release trigger needs `packages: write` for that push
 (`examples/` grants it). A dotnet component has no `path`, so its image is
 built from the repo root; a root `.dockerignore` keeps that context to what
 the Dockerfile copies.
@@ -182,6 +184,10 @@ Running **Release** marks a commit. It deploys nothing.
 3. Builds every component from that commit stamped with the version,
    generates CycloneDX SBOMs, signs with keyless cosign, attests provenance.
    Container images are pushed to the registry now and signed by digest.
+   A private or internal repo signs nothing with cosign unless it sets the
+   `sign-private-to-public-log` input, because the signature would put the
+   repo's name in Sigstore's public log. Its files still get GitHub's
+   attestation, where the Plan offers it; its container images get neither.
 4. Creates the GitHub Release as a draft with every asset, pushes the tag,
    then publishes the release. A failed upload leaves no orphan tag.
 
@@ -218,6 +224,21 @@ gh attestation verify api-X.Y.Z.zip -R OWNER/REPO --signer-repo Haam909/ci-workf
 
 Without `--signer-repo` it fails with `verifying with issuer "sigstore.dev"`.
 `SHA256SUMS` in the release covers every asset: `sha256sum -c SHA256SUMS`.
+
+A public repo's container image is signed in the registry by this repo's
+release workflow at the tag the trigger calls. The release's `<name>.image`
+asset names the image by digest:
+
+```bash
+cosign verify \
+  --certificate-identity https://github.com/Haam909/ci-workflows/.github/workflows/reusable-release.yml@refs/tags/v2 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$(cat billing.image)"
+```
+
+Run on `billing.image` from `Haam909/ciw-sbx-apps` release `v0.3.1`, it
+exits 0. A private or internal repo's image isn't signed, so there's nothing
+to check.
 
 ## Onboarding a repo
 
@@ -495,8 +516,10 @@ not `@v2`, in two ways, and needs no consumer repo or Azure:
   new that the workflows handle gets a component there.
 
 Not covered: Deploy (`reusable-deploy-to-production.yml`), which needs a
-published release; the release's tag push and publish; and deriving a version
-from merged PRs, since this repo has no release tags (`v1` and `v2` aren't).
+published release; the release's tag push and publish; deriving a version
+from merged PRs, since this repo has no release tags (`v1` and `v2` aren't);
+and reading a copy that isn't public with the release's GitHub App, since
+self-test reads this repo with its own token.
 Move `v2` only after self-test passes on `main`.
 
 Consumers pin `@v2`. Move `v2` forward for compatible changes; cut `v3` for
@@ -509,7 +532,10 @@ each job checks out `job.workflow_repository` at `job.workflow_sha` into
 own actions, moving `v2` or cutting `v3` takes them along, and the workflows
 name no account. That checkout uses the calling repo's `GITHUB_TOKEN`, which
 can read no other private repo, so this repo has to be public (SETUP-GITHUB.md
-step 1). A container built from the repo root has `.ci-workflows` in its
+step 1). A copy that can't be, like every copy on a GHE.com tenant, is read
+with a token from the release's GitHub App instead, when the calling repo
+sees `RELEASE_APP_CLIENT_ID` (SETUP-ACCOUNTS.md, "A GHE.com tenant"). That
+path hasn't been run yet. A container built from the repo root has `.ci-workflows` in its
 context unless the root `.dockerignore` leaves it out, as one that starts with
 `*` does.
 

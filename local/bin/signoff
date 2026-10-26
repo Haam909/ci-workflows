@@ -37,11 +37,14 @@ done
 SHA="${SHA:-$(git rev-parse HEAD)}"
 command -v gh > /dev/null || { echo "gh is required: https://cli.github.com" >&2; exit 2; }
 
-REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-WHO="$(gh api user --jq .login)"
+# gh api goes to github.com unless told otherwise, so send it to the Host gh
+# found the repo on: a <tenant>.ghe.com repo's status is posted there.
+read -r REPO HOST < <(gh repo view --json nameWithOwner,url --jq '"\(.nameWithOwner) \(.url | split("/")[2])"') || true
+[[ -n "${HOST:-}" ]] || { echo "gh repo view found no GitHub repo here" >&2; exit 2; }
+WHO="$(gh api --hostname "${HOST}" user --jq .login)"
 
 post() {
-  gh api --method POST "repos/${REPO}/statuses/${SHA}" \
+  gh api --hostname "${HOST}" --method POST "repos/${REPO}/statuses/${SHA}" \
     -f state="${STATE}" \
     -f context="${CONTEXT}" \
     -f description="${WHO} ran bin/ci locally" \

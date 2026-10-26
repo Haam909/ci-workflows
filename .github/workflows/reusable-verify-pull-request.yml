@@ -99,6 +99,20 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
+      # A copy of ci-workflows that isn't public, which is every copy on a
+      # GHE.com tenant, can't be read with this repo's GITHUB_TOKEN. The
+      # release's GitHub App can, once it's installed on the copy too. If this
+      # fails, the checkout falls back to GITHUB_TOKEN, enough for a public copy.
+      - name: Token for the ci-workflows checkout
+        id: ciw-token
+        if: vars.RELEASE_APP_CLIENT_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ job.workflow_repository }}
+          permission-contents: read
       # The action comes from the commit that defines this workflow, the one
       # `v2` points at.
       - uses: actions/checkout@v4
@@ -110,6 +124,7 @@ jobs:
             actions
             local
           persist-credentials: false
+          token: ${{ steps.ciw-token.outputs.token || github.token }}
       - uses: ./.ci-workflows/actions/check-branch-name
         with:
           branch: ${{ github.head_ref }}

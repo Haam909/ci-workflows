@@ -74,6 +74,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A copy of ci-workflows that isn't public, which is every copy on a
+      # GHE.com tenant, can't be read with this repo's GITHUB_TOKEN. The
+      # release's GitHub App can, once it's installed on the copy too. If this
+      # fails, the checkout falls back to GITHUB_TOKEN, enough for a public copy.
+      - name: Token for the ci-workflows checkout
+        id: ciw-token
+        if: vars.RELEASE_APP_CLIENT_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ job.workflow_repository }}
+          permission-contents: read
+
       # The actions come from the commit that defines this workflow: the one
       # `v2` points at for a consumer, the commit under test in self-test.yml.
       # After the repo's own checkout, which would clean it away.
@@ -86,6 +101,7 @@ jobs:
             actions
             local
           persist-credentials: false
+          token: ${{ steps.ciw-token.outputs.token || github.token }}
 
       - name: Find the commit to release
         id: target
@@ -196,6 +212,18 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
 
+      # A copy that isn't public needs the app's token (see resolve).
+      - name: Token for the ci-workflows checkout
+        id: ciw-token
+        if: vars.RELEASE_APP_CLIENT_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ job.workflow_repository }}
+          permission-contents: read
+
       # This workflow's actions, from its own commit (see resolve).
       - uses: actions/checkout@v4
         with:
@@ -206,6 +234,7 @@ jobs:
             actions
             local
           persist-credentials: false
+          token: ${{ steps.ciw-token.outputs.token || github.token }}
 
       # Installing from Azure Artifacts takes an Entra token, so log in before
       # the install whenever the repo has an Azure identity at all; the repo's
@@ -229,7 +258,8 @@ jobs:
 
       # A container image has to live in a registry, so it is pushed now,
       # at release, and deploy-to-production points the app at it later.
-      # Without ACR_NAME it goes to ghcr.io with the workflow token, which
+      # Without ACR_NAME it goes to the Host's Container registry (ghcr.io on
+      # github.com) with the workflow token, which
       # needs `packages: write` from the trigger.
       - uses: azure/login@v2
         if: matrix.component.target == 'container' && vars.ACR_NAME != ''

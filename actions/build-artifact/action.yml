@@ -12,11 +12,12 @@ inputs:
   registry:
     description: >-
       ACR login server, e.g. contoso.azurecr.io (container target). Blank
-      pushes to ghcr.io/<owner>/<repo> on github.com, logged in with
-      github-token.
+      pushes to the Host's Container registry, logged in with github-token:
+      ghcr.io/<owner>/<repo> on github.com,
+      containers.<tenant>.ghe.com/<owner>/<repo> on a GHE.com tenant.
     default: ''
   github-token:
-    description: 'GITHUB_TOKEN, used when a container goes to ghcr.io'
+    description: "GITHUB_TOKEN, used when a container goes to the Host's Container registry"
     default: ''
 
 outputs:
@@ -76,17 +77,23 @@ runs:
 
         # ---------- container: same path for every runtime ----------
         if [[ "${TARGET}" == "container" ]]; then
-          # No ACR: the Host's own container registry. Only github.com's is
-          # known. Its names must be lowercase, and carry the repo so two of
-          # the owner's repos with a component of the same name don't meet.
+          # No ACR: the Host's own Container registry, ghcr.io on github.com
+          # and containers.<tenant>.ghe.com on a GHE.com tenant ("replace
+          # "ghcr.io" with https://containers.SUBDOMAIN.ghe.com", GitHub Docs,
+          # Working with the Container registry). Its names must be lowercase,
+          # and carry the repo so two of the owner's repos with a component of
+          # the same name don't meet.
           if [[ -z "${REGISTRY}" ]]; then
             HOST="${GITHUB_SERVER_URL#https://}"; HOST="${HOST%/}"
-            [[ "${HOST}" == github.com ]] \
-              || { echo "::error::container target needs a registry: set ACR_NAME (no container registry is known for ${HOST})"; exit 1; }
+            case "${HOST}" in
+              github.com) CR=ghcr.io ;;
+              *.ghe.com)  CR="containers.${HOST}" ;;
+              *) echo "::error::container target needs a registry: set ACR_NAME (no Container registry is known for ${HOST})"; exit 1 ;;
+            esac
             [[ -n "${GH_TOKEN_IN}" ]] \
-              || { echo "::error::container target needs a registry, or github-token for ghcr.io"; exit 1; }
-            REGISTRY="ghcr.io/${GITHUB_REPOSITORY,,}"
-            echo "${GH_TOKEN_IN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+              || { echo "::error::container target needs a registry, or github-token for ${CR}"; exit 1; }
+            REGISTRY="${CR}/${GITHUB_REPOSITORY,,}"
+            echo "${GH_TOKEN_IN}" | docker login "${CR}" -u "${GITHUB_ACTOR}" --password-stdin
           fi
           IMAGE="${REGISTRY}/${NAME}:${VERSION}"
           docker build \
