@@ -25,7 +25,7 @@ unnecessary for most suites.
    └─ pre-push hook
        ├─ is my root current with main?  ──── fetch origin/main
        ├─ is HEAD the pushed commit, with nothing uncommitted?
-       ├─ bin/ci  (lint, typecheck, unit, integration)
+       ├─ bin/ci  (lint, typecheck, image, unit, integration)
        └─ push proceeds ──────────────────────► objects land
            └─ bin/signoff --wait ─────────────► status local/ci = success
                                                   pinned to that SHA, by author
@@ -66,6 +66,7 @@ overrides it. The PR gate compares with the PR's base branch.
 |---|---|---|---|
 | Up to date with main | advisory | enforced | — |
 | Lint, typecheck | ✓ | — | — |
+| Container image build | ✓ | — | ✓ (and pushed) |
 | Unit tests | ✓ | — | ✓ |
 | Integration tests | ✓ | — | ✓ |
 | Signoff present | — | enforced | — |
@@ -78,6 +79,9 @@ Integration tests run locally because they are the checks most likely to
 catch a real defect — deferring them to a server after the merge defeats the
 point of gating. Testcontainers drives the local Docker daemon, so `bin/ci`
 refuses to run rather than silently skipping them when Docker is down.
+A `container` component's image is built the same way, from its
+`dockerfile` with its `path` as the context, so a broken Dockerfile fails
+the push rather than the merge run; nothing is pushed.
 
 Podman works too. On Windows, the Podman machine serves the Docker API on
 `\\.\pipe\docker_engine`, which is where Testcontainers looks by default, so
@@ -135,7 +139,8 @@ Requirements: `bash`, `yq`, `gh` (authenticated with `gh auth login`, with
 `--scopes read:packages` if a `nuget.config` or `.npmrc` names GitHub Packages),
 `az` logged in (`az login --allow-no-subscriptions`) if a `nuget.config`,
 `.npmrc` or `requirements*.txt` names an Azure Artifacts Feed, Docker
-or Podman running if the manifest mentions integration tests (see README.md), plus
+or Podman running if the manifest mentions integration tests (see README.md) or
+has a `container` component, plus
 whatever toolchains the repo's components use. On Windows the hook runs under
 Git Bash, which ships with Git for Windows, and `yq` installs with
 `winget install --id MikeFarah.yq -e --source winget` — open a new terminal
@@ -149,7 +154,7 @@ rather than Git Bash, so run `bin/ci` by hand with
 ## Using it
 
 ```bash
-bin/ci                  # the gate: lint, typecheck, unit, integration
+bin/ci                  # the gate: lint, typecheck, image, unit, integration
 bin/ci --quick          # unit tests only — fast loop while coding
 bin/ci --install        # restore dependencies first, after a pull
 bin/ci --only api       # one component
