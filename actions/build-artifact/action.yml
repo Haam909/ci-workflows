@@ -50,9 +50,11 @@ runs:
         STAGE="${RUNNER_TEMP}/stage/${NAME}"
         mkdir -p "${OUT}" "${STAGE}"
 
+        # .ci-workflows is where the reusable workflows check out their actions.
         copy_tree() {
           tar -C "$1" \
             --exclude=./.git --exclude=./node_modules --exclude=./_artifacts \
+            --exclude=./.ci-workflows \
             --exclude=./.venv --exclude=./venv --exclude='__pycache__' \
             -cf - . | tar -C "${STAGE}" -xf -
         }

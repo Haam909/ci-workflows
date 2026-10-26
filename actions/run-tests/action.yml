@@ -23,6 +23,7 @@ runs:
       run: |
         set -euo pipefail
         NAME="$(jq -r '.name' <<< "$C")"
-        # The runner downloads the whole ci-workflows repo for this action,
-        # so local/bin/ci sits two directories up from here.
+        # This action comes with the rest of ci-workflows (the reusable
+        # workflows check out actions/ and local/), so local/bin/ci sits two
+        # directories up from here.
         "${GITHUB_ACTION_PATH}/../../local/bin/ci" --only "${NAME}" --tests

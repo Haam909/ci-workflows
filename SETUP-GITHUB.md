@@ -74,9 +74,9 @@ The `trigger-*` files say **when**. The `reusable-*` files say **what**.
 
 On GitHub, create a new repository called `ci-workflows`.
 
-**Make it public.** Not because the code is special, but because a private
-repo can only be called by repos you've explicitly granted access to, and
-that's one more thing to get wrong on day one. There are no secrets in it.
+**Make it public.** Not because the code is special, but because the shared
+workflows check out their own actions with the calling repo's `GITHUB_TOKEN`,
+and that token can read no other private repo. There are no secrets in it.
 
 Unzip this project into it and push:
 
@@ -105,7 +105,7 @@ On macOS use `sed -i ''` instead of `sed -i`.
 Check it worked — this should print your name:
 
 ```bash
-grep -rn 'uses: .*/ci-workflows' .github/workflows | head -3
+grep -rn 'uses: .*/ci-workflows' examples/.github/workflows | head -3
 ```
 
 ## Step 3 — Tag it `v2`

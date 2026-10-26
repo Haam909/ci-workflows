@@ -49,10 +49,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # The actions come from the commit that defines this workflow: the one
+      # `v2` points at for a consumer, the commit under test in self-test.yml.
+      # After the repo's own checkout, which would clean it away.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ci-workflows
+          sparse-checkout: |
+            actions
+            local
+          persist-credentials: false
       - id: read
         run: echo "components=$(yq -o=json -I=0 '.components' '${{ inputs.manifest }}')" >> "$GITHUB_OUTPUT"
       - id: version
-        uses: Haam909/ci-workflows/actions/derive-version@v2
+        uses: ./.ci-workflows/actions/derive-version
         with:
           sha: ${{ github.sha }}
           prerelease: 'true'
@@ -72,6 +84,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # This workflow's actions, from its own commit (see discover).
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ci-workflows
+          sparse-checkout: |
+            actions
+            local
+          persist-credentials: false
+
       # Installing from Azure Artifacts takes an Entra token, so log in before
       # the install whenever the repo has an Azure identity at all; the repo's
       # own nuget.config, .npmrc or requirements files say whether the token
@@ -86,7 +109,7 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
-      - uses: Haam909/ci-workflows/actions/install-toolchain@v2
+      - uses: ./.ci-workflows/actions/install-toolchain
         with:
           component: ${{ toJSON(matrix.component) }}
           node-version: ${{ inputs.node-version }}
@@ -96,7 +119,7 @@ jobs:
       # The developer machines ran these before the merge; this is the
       # backstop for two machines with the same stale SDK. A failing component
       # isn't deployed; the others still are (fail-fast is off).
-      - uses: Haam909/ci-workflows/actions/run-tests@v2
+      - uses: ./.ci-workflows/actions/run-tests
         with:
           component: ${{ toJSON(matrix.component) }}
           manifest: ${{ inputs.manifest }}
@@ -120,14 +143,14 @@ jobs:
         run: az acr login --name "${{ vars.ACR_NAME }}"
 
       - id: build
-        uses: Haam909/ci-workflows/actions/build-artifact@v2
+        uses: ./.ci-workflows/actions/build-artifact
         with:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ needs.discover.outputs.version }}
           registry: ${{ vars.ACR_NAME && format('{0}.azurecr.io', vars.ACR_NAME) || '' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: Haam909/ci-workflows/actions/deliver-artifact@v2
+      - uses: ./.ci-workflows/actions/deliver-artifact
         if: matrix.component.target != 'container' || vars.ACR_NAME != ''
         with:
           component: ${{ toJSON(matrix.component) }}

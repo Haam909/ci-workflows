@@ -1,12 +1,17 @@
 # Haam909/ci-workflows/.github/workflows/self-test.yml
 #
-# Tests this repo's own actions before `v2` moves: builds each fixture in
-# tests/components.yml with the actions from this checkout (not @v2), then
-# checks the artifact and the SBOM. No consumer repo, release or version is
-# involved.
+# Tests this repo at the commit under test, not @v2, before `v2` moves:
 #
-# Container targets push to a registry service container on localhost:5000,
-# so they need no Azure.
+# - build: each fixture in tests/components.yml, with the actions alone;
+#   checks the artifact and the SBOM. Containers push to a registry service
+#   container on localhost:5000.
+# - merge, release, pull-request: the reusable workflows themselves, which
+#   check out their actions from this commit too, over tests/workflows.yml:
+#   a merge run, a release that tags and publishes nothing, and the PR gate.
+#   Containers push to ghcr.io/haam909/ci-workflows. Each job grants what its
+#   trigger in examples/ grants (release: contents read, not write).
+#
+# None of it needs Azure.
 
 name: self-test
 
@@ -132,3 +137,46 @@ jobs:
           done <<< "$(list forbid-deps)"
 
           exit "${FAIL}"
+
+  merge:
+    uses: ./.github/workflows/reusable-deploy-to-test.yml
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+      deployments: write
+      packages: write
+    with:
+      manifest: tests/workflows.yml
+    secrets: inherit
+
+  # sha: the commit under test, not the newest test deployment, which another
+  # run may have made. contents: read where the trigger has write: a dry run
+  # pushes no tag.
+  release:
+    uses: ./.github/workflows/reusable-release.yml
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      deployments: read
+      id-token: write
+      attestations: write
+      packages: write
+    with:
+      manifest: tests/workflows.yml
+      sha: ${{ github.sha }}
+      dry-run: true
+    secrets: inherit
+
+  # This repo's commits carry no local/ci statuses, so none are required; the
+  # check still runs.
+  pull-request:
+    uses: ./.github/workflows/reusable-verify-pull-request.yml
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+    with:
+      signoffs: 0
+    secrets: inherit

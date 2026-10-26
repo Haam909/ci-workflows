@@ -1,0 +1,44 @@
+# Self-test manifest for the reusable workflows. self-test.yml runs it
+# through reusable-deploy-to-test.yml and reusable-release.yml (as a dry run)
+# at the commit under test, with that commit's actions. Only targets that need
+# no Azure: `none`, and `container` with no ACR_NAME, which pushes to
+# ghcr.io/haam909/ci-workflows/<name>.
+#
+# The fixtures are tests/components.yml's. They have no tests of their own,
+# so commands.test gives each a cheap one, run by run-tests through bin/ci; a
+# dotnet component with no test-project is skipped there.
+components:
+  - name: ts-app
+    runtime: node
+    target: none
+    path: tests/fixtures/ts-app
+    commands:
+      test: npx --no-install tsc --noEmit
+
+  - name: py-app
+    runtime: python
+    target: none
+    path: tests/fixtures/py-app
+    commands:
+      test: python -c "import app"
+
+  - name: dotnet-app
+    runtime: dotnet
+    target: none
+    project: tests/fixtures/dotnet-app/DotnetApp.csproj
+    dotnet-version: '10.0.x'
+
+  - name: py-container
+    runtime: python
+    target: container
+    path: tests/fixtures/py-container
+    dockerfile: tests/fixtures/py-container/Dockerfile
+    commands:
+      test: python -c "import app; print(app.status())"
+
+  - name: dotnet-container
+    runtime: dotnet
+    target: container
+    project: tests/fixtures/dotnet-container/DotnetContainer.csproj
+    dockerfile: tests/fixtures/dotnet-container/Dockerfile
+    dotnet-version: '10.0.x'
