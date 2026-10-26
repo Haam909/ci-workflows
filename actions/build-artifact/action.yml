@@ -10,7 +10,13 @@ inputs:
   version:
     required: true
   registry:
-    description: 'ACR login server, e.g. contoso.azurecr.io (container target)'
+    description: >-
+      ACR login server, e.g. contoso.azurecr.io (container target). Blank
+      pushes to ghcr.io/<owner>/<repo> on github.com, logged in with
+      github-token.
+    default: ''
+  github-token:
+    description: 'GITHUB_TOKEN, used when a container goes to ghcr.io'
     default: ''
 
 outputs:
@@ -27,6 +33,7 @@ runs:
         C: ${{ inputs.component }}
         VERSION: ${{ inputs.version }}
         REGISTRY: ${{ inputs.registry }}
+        GH_TOKEN_IN: ${{ inputs.github-token }}
         STAMP_PY: ${{ github.action_path }}/stamp-python-version.py
       run: |
         set -euo pipefail
@@ -67,7 +74,18 @@ runs:
 
         # ---------- container: same path for every runtime ----------
         if [[ "${TARGET}" == "container" ]]; then
-          [[ -n "${REGISTRY}" ]] || { echo "::error::container target needs a registry"; exit 1; }
+          # No ACR: the Host's own container registry. Only github.com's is
+          # known. Its names must be lowercase, and carry the repo so two of
+          # the owner's repos with a component of the same name don't meet.
+          if [[ -z "${REGISTRY}" ]]; then
+            HOST="${GITHUB_SERVER_URL#https://}"; HOST="${HOST%/}"
+            [[ "${HOST}" == github.com ]] \
+              || { echo "::error::container target needs a registry: set ACR_NAME (no container registry is known for ${HOST})"; exit 1; }
+            [[ -n "${GH_TOKEN_IN}" ]] \
+              || { echo "::error::container target needs a registry, or github-token for ghcr.io"; exit 1; }
+            REGISTRY="ghcr.io/${GITHUB_REPOSITORY,,}"
+            echo "${GH_TOKEN_IN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          fi
           IMAGE="${REGISTRY}/${NAME}:${VERSION}"
           docker build \
             --build-arg "VERSION=${VERSION}" \

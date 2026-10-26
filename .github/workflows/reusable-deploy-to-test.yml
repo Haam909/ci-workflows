@@ -4,8 +4,9 @@
 # test. Delivery depends on target, not runtime:
 #
 #   app-service / function  ->  zip deploy to the test app
-#   container               ->  image pushed to ACR, test Container App updated
-#   package                 ->  prerelease published to the feed
+#   container               ->  image pushed to ACR, test Container App updated;
+#                               without ACR_NAME, pushed to ghcr.io and no more
+#   package                ->  prerelease published to the feed
 #
 # All of them run under `environment: test`, so a GitHub deployment record
 # exists either way and reusable-release.yml can read it to find the commit to
@@ -103,9 +104,11 @@ jobs:
       # Services always need Azure. Packages need it only when their feed is
       # Azure Artifacts, to mint the feed token; that needs no subscription,
       # so a repo whose only Azure use is Azure Artifacts sets none. A `none`
-      # target is built and never delivered, so it needs nothing.
+      # target is built and never delivered, so it needs nothing, and nor
+      # does a container without ACR_NAME: its image goes to ghcr.io and
+      # nowhere else.
       - uses: azure/login@v2
-        if: (matrix.component.target != 'package' && matrix.component.target != 'none') || contains(matrix.component.feed || '', 'pkgs.dev.azure.com') || contains(matrix.component.feed || '', 'visualstudio.com')
+        if: (matrix.component.target != 'package' && matrix.component.target != 'none' && (matrix.component.target != 'container' || vars.ACR_NAME != '')) || contains(matrix.component.feed || '', 'pkgs.dev.azure.com') || contains(matrix.component.feed || '', 'visualstudio.com')
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -113,7 +116,7 @@ jobs:
           allow-no-subscriptions: ${{ matrix.component.target == 'package' }}
 
       - name: Log in to ACR
-        if: matrix.component.target == 'container'
+        if: matrix.component.target == 'container' && vars.ACR_NAME != ''
         run: az acr login --name "${{ vars.ACR_NAME }}"
 
       - id: build
@@ -122,8 +125,10 @@ jobs:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ needs.discover.outputs.version }}
           registry: ${{ vars.ACR_NAME && format('{0}.azurecr.io', vars.ACR_NAME) || '' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: Haam909/ci-workflows/actions/deliver-artifact@v2
+        if: matrix.component.target != 'container' || vars.ACR_NAME != ''
         with:
           component: ${{ toJSON(matrix.component) }}
           artifact: ${{ steps.build.outputs.artifact }}

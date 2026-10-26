@@ -194,15 +194,17 @@ jobs:
 
       # A container image has to live in a registry, so it is pushed now,
       # at release, and deploy-to-production points the app at it later.
+      # Without ACR_NAME it goes to ghcr.io with the workflow token, which
+      # needs `packages: write` from the trigger.
       - uses: azure/login@v2
-        if: matrix.component.target == 'container'
+        if: matrix.component.target == 'container' && vars.ACR_NAME != ''
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Log in to ACR
-        if: matrix.component.target == 'container'
+        if: matrix.component.target == 'container' && vars.ACR_NAME != ''
         run: az acr login --name "${{ vars.ACR_NAME }}"
 
       # Locked installs are what make this rebuild from the tested commit
@@ -213,6 +215,7 @@ jobs:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ needs.resolve.outputs.version }}
           registry: ${{ vars.ACR_NAME && format('{0}.azurecr.io', vars.ACR_NAME) || '' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # ---------- SBOM: release deliverable, generated once, here ----------
 

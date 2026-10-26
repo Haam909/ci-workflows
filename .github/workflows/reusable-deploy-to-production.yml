@@ -8,8 +8,9 @@
 # Delivery depends on target, not runtime:
 #
 #   app-service / function  ->  staging slot, smoke test, swap, verify
-#   container               ->  the app is pointed at the image the release pushed
-#   package                 ->  the stable version is published to the feed
+#   container               ->  the app is pointed at the image the release pushed;
+#                               without ACR_NAME, nothing: the image is on ghcr.io
+#   package                ->  the stable version is published to the feed
 #   none                    ->  nothing; the release was the deliverable
 #
 # Running this workflow is the approval. The job names the `production`
@@ -170,9 +171,9 @@ jobs:
       # Services always need Azure. Packages need it only when their feed is
       # Azure Artifacts, to mint the feed token; that needs no subscription,
       # so a repo whose only Azure use is Azure Artifacts sets none. A `none`
-      # target has nowhere to go.
+      # target has nowhere to go, and nor has a container without ACR_NAME.
       - uses: azure/login@v2
-        if: (matrix.component.target != 'package' && matrix.component.target != 'none') || contains(matrix.component.feed || '', 'pkgs.dev.azure.com') || contains(matrix.component.feed || '', 'visualstudio.com')
+        if: (matrix.component.target != 'package' && matrix.component.target != 'none' && (matrix.component.target != 'container' || vars.ACR_NAME != '')) || contains(matrix.component.feed || '', 'pkgs.dev.azure.com') || contains(matrix.component.feed || '', 'visualstudio.com')
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -180,6 +181,7 @@ jobs:
           allow-no-subscriptions: ${{ matrix.component.target == 'package' }}
 
       - uses: Haam909/ci-workflows/actions/deliver-artifact@v2
+        if: matrix.component.target != 'container' || vars.ACR_NAME != ''
         with:
           component: ${{ toJSON(matrix.component) }}
           artifact: ${{ steps.artifact.outputs.path }}

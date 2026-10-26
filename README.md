@@ -69,6 +69,14 @@ signed and attached to the GitHub Release, and the merge and deploy steps
 deliver nothing. It needs no Azure configuration. Use it for the versioning
 and release flow on its own.
 
+`container` pushes its image to ACR when the repo sets `ACR_NAME`, and the
+merge and Deploy point a Container App at it. Without `ACR_NAME`, on
+github.com, the merge run and the Release push the image to
+`ghcr.io/<owner>/<repo>/<component>` with the workflow token, signed by
+digest at release, and nothing is deployed; it needs no Azure configuration
+either. The Release trigger needs `packages: write` for that push
+(`examples/` grants it).
+
 Adding a runtime touches `install-toolchain`, `build-artifact` and `bin/ci`.
 Adding a target touches `deliver-artifact`. Nothing else.
 
@@ -224,8 +232,8 @@ Without `--signer-repo` it fails with `verifying with issuer "sigstore.dev"`.
 6. Lock files (below).
 7. Only if a component deploys to Azure, or publishes to or installs from
    Azure Artifacts: repo variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-   `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, plus `ACR_NAME` for
-   `container`; and federated credentials on the app that accept the repo's
+   `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, plus `ACR_NAME` for a
+   `container` that deploys to a Container App; and federated credentials on the app that accept the repo's
    tokens for the `test` and `production` environments and for
    `ref:refs/heads/main`. The Release build runs under no environment, from
    `main`, and with `AZURE_CLIENT_ID` set it logs in to Azure in every job, so
