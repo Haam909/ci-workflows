@@ -239,8 +239,19 @@ cosign verify \
 ```
 
 Run on `billing.image` from `Haam909/ciw-sbx-apps` release `v0.3.1`, it
-exits 0. A private or internal repo's image isn't signed, so there's nothing
-to check.
+exits 0. A private or internal repo's image isn't signed with cosign.
+
+Every released image is attested as well, public or not, with the
+attestation stored by GitHub and in the registry beside the image:
+
+```bash
+gh attestation verify "oci://$(cat billing.image)" -R OWNER/REPO --signer-repo Haam909/ci-workflows
+```
+
+`--bundle-from-oci` reads the attestation from the registry instead. On the
+`py-container` image from self-test run 40378839224 it exits 0 both ways,
+and with another `--signer-repo` it fails with `verifying with issuer
+"sigstore.dev"`. A private repo's image attestation hasn't been run.
 
 ## Onboarding a repo
 
