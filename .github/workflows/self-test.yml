@@ -51,7 +51,7 @@ jobs:
       VERSION: '1.2.3'
     services:
       registry:
-        # Only the container fixture pushes to it; an empty image starts no
+        # Only the container fixtures push to it; an empty image starts no
         # service. A copy on ghcr.io (mirror-images.yml): Docker Hub limits pulls.
         image: ${{ matrix.component.target == 'container' && 'ghcr.io/haam909/registry:2' || '' }}
         ports: ['5000:5000']
