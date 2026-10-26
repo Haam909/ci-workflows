@@ -314,8 +314,11 @@ jobs:
           done
 
       # Attestations work in public repos on every plan, and in private ones
-      # only on GitHub Enterprise Cloud. A private repo elsewhere gets a
-      # warning instead of a failed release.
+      # only on GitHub Enterprise Cloud, where they use GitHub's own Sigstore
+      # instance and so publish nothing about the repo. A private repo
+      # elsewhere gets a warning instead of a failed release. Files are
+      # attested by path; an image by digest, with the attestation pushed to
+      # the registry beside it.
       - uses: actions/attest-build-provenance@v2
         id: attest
         if: matrix.component.target != 'container'
@@ -327,16 +330,34 @@ jobs:
             _artifacts/*.tgz
             _artifacts/*.whl
 
-      - name: Note what wasn't signed
-        if: steps.attest.outcome == 'failure' || (github.event.repository.visibility != 'public' && !inputs.sign-private-to-public-log)
+      - name: Image name and digest
+        id: image
+        if: matrix.component.target == 'container'
         env:
-          ATTEST: ${{ steps.attest.outcome }}
+          IMAGE: ${{ steps.build.outputs.artifact }}
+        run: |
+          echo "name=${IMAGE%@*}" >> "$GITHUB_OUTPUT"
+          echo "digest=${IMAGE#*@}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/attest-build-provenance@v2
+        id: attest-image
+        if: matrix.component.target == 'container'
+        continue-on-error: ${{ github.event.repository.visibility != 'public' }}
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Note what wasn't signed
+        if: steps.attest.outcome == 'failure' || steps.attest-image.outcome == 'failure' || (github.event.repository.visibility != 'public' && !inputs.sign-private-to-public-log)
+        env:
+          ATTEST: ${{ (steps.attest.outcome == 'failure' || steps.attest-image.outcome == 'failure') && 'failure' || 'success' }}
         run: |
           {
             echo "### ${{ matrix.component.name }}: provenance"
             [[ "${ATTEST}" == failure ]] && echo "- No attestation: GitHub offers them on private repos only with Enterprise Cloud."
             [[ "${{ github.event.repository.visibility }}" != public && "${{ inputs.sign-private-to-public-log }}" != true ]] \
-              && echo "- No cosign bundles: this repo is ${{ github.event.repository.visibility }}, and they'd publish its name to Sigstore's public log (input sign-private-to-public-log)."
+              && echo "- No cosign signatures: this repo is ${{ github.event.repository.visibility }}, and they'd publish its name to Sigstore's public log (input sign-private-to-public-log)."
             echo "- SHA256SUMS in the release still covers every asset."
           } >> "$GITHUB_STEP_SUMMARY"
           [[ "${ATTEST}" == failure ]] && echo "::warning::${{ matrix.component.name }}: no attestation (private repo without Enterprise Cloud)" || true

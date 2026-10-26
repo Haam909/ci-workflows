@@ -75,8 +75,8 @@ run and the Release push the image to the Host's Container registry with the
 workflow token, and nothing is deployed; it needs no Azure configuration
 either. That's `ghcr.io/<owner>/<repo>/<component>` on github.com and
 `containers.<tenant>.ghe.com/<owner>/<repo>/<component>` on a GHE.com tenant
-(not yet run there). A public repo's released image is signed by digest; a
-private or internal repo's isn't (What a release does). The Release trigger needs `packages: write` for that push
+(not yet run there). A released image is attested by digest, and a public
+repo's is signed with cosign too (What a release does). The Release trigger needs `packages: write` for that push
 (`examples/` grants it). A dotnet component has no `path`, so its image is
 built from the repo root; a root `.dockerignore` keeps that context to what
 the Dockerfile copies.
@@ -183,11 +183,13 @@ Running **Release** marks a commit. It deploys nothing.
    merged after it doesn't count.
 3. Builds every component from that commit stamped with the version,
    generates CycloneDX SBOMs, signs with keyless cosign, attests provenance.
-   Container images are pushed to the registry now and signed by digest.
+   Container images are pushed to the registry now, signed and attested by
+   digest, with the attestation pushed to the registry beside the image.
    A private or internal repo signs nothing with cosign unless it sets the
    `sign-private-to-public-log` input, because the signature would put the
-   repo's name in Sigstore's public log. Its files still get GitHub's
-   attestation, where the Plan offers it; its container images get neither.
+   repo's name in Sigstore's public log. Its files and images still get
+   GitHub's attestation where the Plan offers it, from GitHub's own Sigstore
+   instance.
 4. Creates the GitHub Release as a draft with every asset, pushes the tag,
    then publishes the release. A failed upload leaves no orphan tag.
 

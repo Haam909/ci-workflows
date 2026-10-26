@@ -199,8 +199,8 @@ An image built from the repo root needs a root `.dockerignore` that starts
 with `*` and lets back in only what the Dockerfile copies. Without one the
 context includes `.ci-workflows`, where the workflows check out their
 actions. Pushed from a public repo, the images came out public. The Release
-signs a public repo's image with cosign; README.md, "Checking a release's
-provenance", has the command to check it.
+attests the image, and signs a public repo's with cosign as well; README.md,
+"Checking a release's provenance", has the commands to check them.
 
 Delete the example's comment block as well. `bin/ci` searches the whole file
 for the word `integration`, comments included, and refuses to run without

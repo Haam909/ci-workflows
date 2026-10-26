@@ -486,9 +486,9 @@ What's different from github.com:
   Package feeds).
 - Every repo is private or internal, so the release writes no cosign
   bundles (the **Sign** step runs for public repos only) and relies on
-  GitHub's attestation, which hasn't been tried on a tenant. A container
-  image gets neither: the attestation step skips containers. Released images
-  on a tenant are pushed by digest but not signed.
+  GitHub's attestation, which hasn't been tried on a tenant. Images are
+  attested by digest too, with the attestation pushed to the registry beside
+  them.
 
 [Feature overview for GitHub Enterprise Cloud with data residency](https://docs.github.com/en/enterprise-cloud@latest/admin/data-residency/feature-overview-for-github-enterprise-cloud-with-data-residency),
 [Working with the Container registry](https://docs.github.com/en/enterprise-cloud@latest/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
@@ -578,8 +578,9 @@ What's different from github.com:
      Enterprise Server.
    - `merge / py-container -> test` pushes to
      `containers.<tenant>.ghe.com/<org>/ci-workflows/py-container`.
-   - `release / build ts-app` and the other non-container builds either
-     attest or warn "no attestation".
+   - Each `release / build …` job either attests or warns "no attestation";
+     `release / build py-container` pushes its attestation to the tenant's
+     registry beside the image.
    - The `build` job's two container fixtures use a registry image from
      `ghcr.io/haam909`. Whether a tenant's runner can pull it is untested;
      if they fail there, the rest of the run still answers the above.
@@ -601,5 +602,5 @@ What's different from github.com:
      `bin/signoff` to the tenant.
 
    Then the merge run pushes any container to
-   `containers.<tenant>.ghe.com/<org>/<repo>/<component>`, and the Release's
-   notes say what wasn't signed.
+   `containers.<tenant>.ghe.com/<org>/<repo>/<component>`, and each Release
+   build job's summary says what wasn't signed.
