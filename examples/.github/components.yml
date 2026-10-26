@@ -8,6 +8,9 @@
 # Any combination works. A Python Function and a C# Function deploy
 # identically; only the build differs. `none` builds, signs and attaches the
 # artifact to the GitHub Release and deploys nowhere: no Azure needed.
+# `container` goes to ACR and a Container App when the repo sets ACR_NAME;
+# without it, the image goes to ghcr.io/<owner>/<repo>/<name> and is
+# deployed nowhere, also with no Azure.
 #
 # Optional per component:
 #   path                    working directory (node/python); defaults to repo root
