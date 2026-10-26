@@ -42,7 +42,8 @@ runs:
       run: |
         set -euo pipefail
 
-        PREV_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${TARGET_SHA}" 2>/dev/null || true)"
+        # Release tags only (v1.4.0): a major-version tag like v2 isn't one.
+        PREV_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "${TARGET_SHA}" 2>/dev/null || true)"
 
         if [[ -z "${PREV_TAG}" ]]; then
           echo "::notice::No previous version tag; seeding at 0.1.0"

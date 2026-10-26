@@ -46,6 +46,13 @@ on:
           signing records the repo's name in Sigstore's public log.
         type: boolean
         default: false
+      dry-run:
+        description: >-
+          Build, sign and attest, but push no tag and publish no release, and
+          accept a commit that isn't on the default branch yet. For
+          ci-workflows' own self-test.
+        type: boolean
+        default: false
     outputs:
       version:
         value: ${{ jobs.resolve.outputs.version }}
@@ -67,12 +74,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The actions come from the commit that defines this workflow: the one
+      # `v2` points at for a consumer, the commit under test in self-test.yml.
+      # After the repo's own checkout, which would clean it away.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ci-workflows
+          sparse-checkout: |
+            actions
+            local
+          persist-credentials: false
+
       - name: Find the commit to release
         id: target
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_SHA: ${{ inputs.sha }}
           DEFAULT: ${{ github.event.repository.default_branch }}
+          DRY_RUN: ${{ inputs.dry-run }}
         run: |
           set -euo pipefail
           SHA=""; CREATED=""
@@ -97,14 +118,17 @@ jobs:
             SOURCE="live in test"
           fi
 
-          git merge-base --is-ancestor "${SHA}" "origin/${DEFAULT}" \
-            || { echo "::error::${SHA} is not an ancestor of ${DEFAULT}."; exit 1; }
+          # A dry run builds a pull request's commit too.
+          if [[ "${DRY_RUN}" != true ]]; then
+            git merge-base --is-ancestor "${SHA}" "origin/${DEFAULT}" \
+              || { echo "::error::${SHA} is not an ancestor of ${DEFAULT}."; exit 1; }
+          fi
 
           # Versions only move forward: the commit must contain the latest
           # release. A commit at or behind it would derive a version that
           # already exists; one on a branch that forked before it (and merged
           # after) would ship without that release's changes.
-          LATEST="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "origin/${DEFAULT}" 2>/dev/null || true)"
+          LATEST="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' "origin/${DEFAULT}" 2>/dev/null || true)"
           if [[ -n "${LATEST}" ]]; then
             if git merge-base --is-ancestor "${SHA}" "${LATEST}"; then
               echo "::error::${SHA:0:7} is already included in ${LATEST}. Choose a commit after it."
@@ -141,7 +165,7 @@ jobs:
           echo "Manifest at ${SHA:0:7}: ${COMPONENTS}"
 
       - id: version
-        uses: Haam909/ci-workflows/actions/derive-version@v2
+        uses: ./.ci-workflows/actions/derive-version
         with:
           sha: ${{ steps.target.outputs.sha }}
           force-major: ${{ inputs.major }}
@@ -172,6 +196,17 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
 
+      # This workflow's actions, from its own commit (see resolve).
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ci-workflows
+          sparse-checkout: |
+            actions
+            local
+          persist-credentials: false
+
       # Installing from Azure Artifacts takes an Entra token, so log in before
       # the install whenever the repo has an Azure identity at all; the repo's
       # own nuget.config, .npmrc or requirements files say whether the token
@@ -185,7 +220,7 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
-      - uses: Haam909/ci-workflows/actions/install-toolchain@v2
+      - uses: ./.ci-workflows/actions/install-toolchain
         with:
           component: ${{ toJSON(matrix.component) }}
           node-version: ${{ inputs.node-version }}
@@ -210,7 +245,7 @@ jobs:
       # Locked installs are what make this rebuild from the tested commit
       # resolve to the same dependencies, rather than checking afterwards.
       - id: build
-        uses: Haam909/ci-workflows/actions/build-artifact@v2
+        uses: ./.ci-workflows/actions/build-artifact
         with:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ needs.resolve.outputs.version }}
@@ -220,7 +255,7 @@ jobs:
       # ---------- SBOM: release deliverable, generated once, here ----------
 
       - name: SBOM
-        uses: Haam909/ci-workflows/actions/generate-sbom@v2
+        uses: ./.ci-workflows/actions/generate-sbom
         with:
           component: ${{ toJSON(matrix.component) }}
           version: ${{ needs.resolve.outputs.version }}
@@ -295,12 +330,13 @@ jobs:
         with:
           name: release-${{ matrix.component.name }}
           path: _artifacts/
-          retention-days: 90
+          retention-days: ${{ inputs.dry-run && 1 || 90 }}
           if-no-files-found: error
 
   publish:
     name: tag and publish release
     needs: [resolve, build]
+    if: ${{ !inputs.dry-run }}
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.resolve.outputs.version }}

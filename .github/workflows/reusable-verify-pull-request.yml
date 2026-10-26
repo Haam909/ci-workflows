@@ -99,6 +99,17 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: Haam909/ci-workflows/actions/check-branch-name@v2
+      # The action comes from the commit that defines this workflow, the one
+      # `v2` points at.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ci-workflows
+          sparse-checkout: |
+            actions
+            local
+          persist-credentials: false
+      - uses: ./.ci-workflows/actions/check-branch-name
         with:
           branch: ${{ github.head_ref }}

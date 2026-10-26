@@ -478,22 +478,44 @@ active rule blocks the release's own tag push.
 
 ## Versioning this repo
 
-Change this repo through a pull request. `self-test.yml` builds each fixture
-in `tests/components.yml` with the actions from that branch (not `@v2`) and
-checks the artifact's name and contents and the SBOM's root version and
-component list. It covers every runtime with the `app-service`, `function` and
-`package` targets, and a Python and a .NET `container`, and needs no consumer
-repo, release or Azure: the container fixtures push to a registry service
-container on `localhost:5000`. Move `v2` only after it passes on `main`. The
-push to ghcr.io (a container without `ACR_NAME`) isn't covered there.
+Change this repo through a pull request. `self-test.yml` tests that branch,
+not `@v2`, in two ways, and needs no consumer repo or Azure:
+
+- It builds each fixture in `tests/components.yml` with the actions alone and
+  checks the artifact's name and contents and the SBOM's root version and
+  component list. That covers every runtime with the `app-service`,
+  `function` and `package` targets, and a Python and a .NET `container`
+  pushed to a registry service container on `localhost:5000`.
+- It runs the reusable workflows themselves over `tests/workflows.yml`: the
+  merge run, the release with `dry-run` (it builds, signs and attests, but
+  pushes no tag and publishes no release), and the PR gate with no signoffs
+  required. Each gets the permissions its trigger in `examples/` grants, the
+  release `contents: read`. The components are apps at `none` and a Python
+  and a .NET `container`, pushed to `ghcr.io/haam909/ci-workflows`. Something
+  new that the workflows handle gets a component there.
+
+Not covered: Deploy (`reusable-deploy-to-production.yml`), which needs a
+published release; the release's tag push and publish; and deriving a version
+from merged PRs, since this repo has no release tags (`v1` and `v2` aren't).
+Move `v2` only after self-test passes on `main`.
 
 Consumers pin `@v2`. Move `v2` forward for compatible changes; cut `v3` for
 anything needing manifest changes — thirty repos means a breaking change here
 is thirty PRs, so prefer additive keys with defaults.
 
-The `Haam909/ci-workflows/...@v2` references inside the workflows and the
-examples point at the account this copy was set up under. Substitute your org
-name when moving it (SETUP-GITHUB.md step 2).
+The reusable workflows run the actions from the commit that defines them:
+each job checks out `job.workflow_repository` at `job.workflow_sha` into
+`.ci-workflows` and calls `./.ci-workflows/actions/...`. So a branch runs its
+own actions, moving `v2` or cutting `v3` takes them along, and the workflows
+name no account. That checkout uses the calling repo's `GITHUB_TOKEN`, which
+can read no other private repo, so this repo has to be public (SETUP-GITHUB.md
+step 1). A container built from the repo root has `.ci-workflows` in its
+context unless the root `.dockerignore` leaves it out, as one that starts with
+`*` does.
+
+The `Haam909/ci-workflows/...@v2` references in the examples point at the
+account this copy was set up under. Substitute your org name when moving it
+(SETUP-GITHUB.md step 2).
 
 ## Known limits
 
